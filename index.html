@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Organic Tree Builder</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet" />
+    <link rel="stylesheet" href="index.css?v=17" />
+</head>
+
+<body>
+    <div id="app">
+        <aside id="left-panel">
+            <div class="panel-header">
+                <h1>🌳 Tree Builder</h1>
+                <p class="subtitle">Define the structure, generate naturally</p>
+            </div>
+            <div class="panel-body">
+                <section class="panel-section">
+                    <h2 class="section-title"><span class="icon">🗂</span> Structure</h2>
+                    <p class="section-hint">Click <b>+</b> to add a branch. Click <b>✕</b> to remove. Terminal
+                        branches get a leaf.</p>
+                    <div id="tree-hierarchy"></div>
+                </section>
+                <div class="panel-divider"></div>
+                <section class="panel-section" id="section-lateral">
+                    <h2 class="section-title"><span class="icon">🌲</span> Lateral Settings</h2>
+                    <p class="section-hint">Side branches sprout from along the parent's length (above min height %).
+                    </p>
+                    <div class="range-pair">
+                        <label>Min Height %</label>
+                        <div class="dual-slider single">
+                            <input type="range" id="r-lat-min-height" min="30" max="90" value="60" />
+                        </div>
+                        <span class="dual-val"><span id="rv-lat-min-height">60</span>%</span>
+                    </div>
+                    <div class="range-pair">
+                        <label>Branch Angle</label>
+                        <div class="dual-slider">
+                            <input type="range" id="r-lat-angle-min" min="15" max="80" value="25" />
+                            <input type="range" id="r-lat-angle-max" min="15" max="80" value="55" />
+                        </div>
+                        <span class="dual-val"><span id="rv-lat-angle-min">25</span>°–<span
+                                id="rv-lat-angle-max">55</span>°</span>
+                    </div>
+                    <div class="range-pair">
+                        <label>Width Ratio</label>
+                        <div class="dual-slider single">
+                            <input type="range" id="r-lat-width-ratio" min="20" max="100" value="65" />
+                        </div>
+                        <span class="dual-val"><span id="rv-lat-width-ratio">65</span>%</span>
+                    </div>
+                    <div class="range-pair">
+                        <label>Debug View</label>
+                        <div class="dual-slider single" style="justify-content: flex-start;">
+                            <input type="checkbox" id="chk-debug-view"
+                                style="width: 20px; height: 20px; accent-color: #4CAF50;" />
+                            <span style="margin-left: 8px; font-size: 0.9em; color: rgba(255,255,255,0.7);">Show zones &
+                                outlines</span>
+                        </div>
+                    </div>
+                </section>
+                <div class="panel-divider"></div>
+                <section class="panel-section">
+                    <h2 class="section-title"><span class="icon">📐</span> Ranges</h2>
+                    <div class="range-pair">
+                        <label>Curviness</label>
+                        <div class="dual-slider">
+                            <input type="range" id="r-curve-min" min="0" max="100" value="10" />
+                            <input type="range" id="r-curve-max" min="0" max="100" value="50" />
+                        </div>
+                        <span class="dual-val"><span id="rv-curve-min">10</span>–<span
+                                id="rv-curve-max">50</span></span>
+                    </div>
+                    <div class="range-pair">
+                        <label>Spread Angle</label>
+                        <div class="dual-slider">
+                            <input type="range" id="r-angle-min" min="5" max="80" value="15" />
+                            <input type="range" id="r-angle-max" min="5" max="80" value="45" />
+                        </div>
+                        <span class="dual-val"><span id="rv-angle-min">15</span>°–<span
+                                id="rv-angle-max">45</span>°</span>
+                    </div>
+                    <div class="range-pair">
+                        <label>Branch Length</label>
+                        <div class="dual-slider">
+                            <input type="range" id="r-len-min" min="30" max="200" value="60" />
+                            <input type="range" id="r-len-max" min="30" max="200" value="140" />
+                        </div>
+                        <span class="dual-val"><span id="rv-len-min">60</span>–<span id="rv-len-max">140</span></span>
+                    </div>
+                    <div class="range-pair">
+                        <label>Trunk Height</label>
+                        <div class="dual-slider single">
+                            <input type="range" id="r-trunk-len" min="60" max="300" value="160" />
+                        </div>
+                        <span class="dual-val"><span id="rv-trunk-len">160</span></span>
+                    </div>
+                    <div class="range-pair">
+                        <label>Trunk Width</label>
+                        <div class="dual-slider single">
+                            <input type="range" id="r-trunk-wid" min="12" max="70" value="36" />
+                        </div>
+                        <span class="dual-val"><span id="rv-trunk-wid">36</span></span>
+                    </div>
+                    <div class="range-pair">
+                        <label>Leaf Hue</label>
+                        <div class="dual-slider single">
+                            <input type="range" id="r-leaf-hue" min="60" max="160" value="115" />
+                        </div>
+                        <span class="dual-val"><span id="rv-leaf-hue">115</span></span>
+                    </div>
+                </section>
+            </div>
+            <div class="panel-footer">
+                <select id="mode-select" class="mode-dropdown">
+                    <option value="lateral">🌲 Lateral</option>
+                    <option value="division">🌿 Division</option>
+                </select>
+                <button id="btn-generate" class="btn btn-primary">🌱 Generate</button>
+                <button id="btn-download" class="btn btn-secondary">💾 PNG</button>
+            </div>
+        </aside>
+        <main id="canvas-area">
+            <canvas id="tree-canvas"></canvas>
+        </main>
+    </div>
+    <script src="tree.js?v=23"></script>
+</body>
+
+</html>
