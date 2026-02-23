@@ -24,6 +24,7 @@
 
   let currentMode = modeSelect.value;
   let drawnSegments = []; // {p1, p2, w} for collision
+  let drawnLeafBodies = []; // {x, y, r} circles approximating leaf area
   let allBranches = [];   // Renderable branch objects
   let hoveredBranch = null;
   let isDebug = false;
@@ -248,9 +249,9 @@
   }
 
   function checkCollision(samples, myWidth) {
-    if (drawnSegments.length === 0) return false;
+    if (drawnSegments.length === 0 && drawnLeafBodies.length === 0) return false;
     const checkStep = 2;
-    const startIdx = Math.floor(samples.length * 0.25);
+    const startIdx = 0;
     for (let i = startIdx; i < samples.length; i += checkStep) {
       const p = samples[i];
       const radius = myWidth * 0.55;
@@ -262,7 +263,17 @@
 
         const d2 = distToSegmentSquared(p, seg.p1, seg.p2);
         const minDist = (radius + seg.w * 0.55);
-        if (d2 < minDist * minDist) return true;
+        if (d2 < minDist * minDist) {
+          return true;
+        }
+      }
+      for (const leaf of drawnLeafBodies) {
+        const dx = p.x - leaf.x;
+        const dy = p.y - leaf.y;
+        const minDist = radius + leaf.r;
+        if (dx * dx + dy * dy < minDist * minDist) {
+          return true;
+        }
       }
     }
     return false;
@@ -270,9 +281,85 @@
 
   function addPathToCollisionMap(path, avgWidth) {
     const step = 4;
+    let segmentCount = 0;
     for (let i = 0; i < path.samples.length - step; i += step) {
       drawnSegments.push({ p1: path.samples[i], p2: path.samples[i + step], w: avgWidth });
+      segmentCount++;
     }
+  }
+
+  function hash01(str) {
+    let h = 2166136261;
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return ((h >>> 0) % 100000) / 100000;
+  }
+
+  function createLeafRenderData(path, tipW, ranges, nodeId, angleOffset = 0, lenMul = 1) {
+    const len = lerp(1.5, 3.5, hash01(nodeId + ":leafLen")) * lenMul;
+    const ang = path.tipTangentAngle + lerp(-0.08, 0.08, hash01(nodeId + ":leafAng")) + angleOffset;
+    const x = path.tipX + Math.sin(ang) * len;
+    const y = path.tipY - Math.cos(ang) * len;
+    return {
+      x,
+      y,
+      angle: ang,
+      size: LEAF_SIZE,
+      hue: ranges.leafHue,
+      stemHalfWidth: Math.min(tipW * 0.35, 0.9),
+    };
+  }
+
+  function buildLeafCollisionCircles(leaf) {
+    const dirX = Math.sin(leaf.angle);
+    const dirY = -Math.cos(leaf.angle);
+    const halfLen = leaf.size * 0.5;
+    return [
+      { x: leaf.x + dirX * (halfLen * 0.34), y: leaf.y + dirY * (halfLen * 0.34), r: leaf.size * 0.16 },
+      { x: leaf.x + dirX * (halfLen * 0.02), y: leaf.y + dirY * (halfLen * 0.02), r: leaf.size * 0.2 },
+      { x: leaf.x - dirX * (halfLen * 0.30), y: leaf.y - dirY * (halfLen * 0.30), r: leaf.size * 0.14 },
+    ];
+  }
+
+  function hasLeafBodyCollision(leaf) {
+    const circles = buildLeafCollisionCircles(leaf);
+    for (const c of circles) {
+      for (const seg of drawnSegments) {
+        if (c.x < Math.min(seg.p1.x, seg.p2.x) - (c.r + 20)) continue;
+        if (c.x > Math.max(seg.p1.x, seg.p2.x) + (c.r + 20)) continue;
+        if (c.y < Math.min(seg.p1.y, seg.p2.y) - (c.r + 20)) continue;
+        if (c.y > Math.max(seg.p1.y, seg.p2.y) + (c.r + 20)) continue;
+        const d2 = distToSegmentSquared(c, seg.p1, seg.p2);
+        const minDist = c.r + seg.w * 0.55;
+        if (d2 < minDist * minDist) return true;
+      }
+      for (const existing of drawnLeafBodies) {
+        const dx = c.x - existing.x;
+        const dy = c.y - existing.y;
+        const minDist = c.r + existing.r;
+        if (dx * dx + dy * dy < minDist * minDist) return true;
+      }
+    }
+    return false;
+  }
+
+  function fitLeafRenderData(path, tipW, ranges, nodeId) {
+    const angleOffsets = [0, -0.2, 0.2, -0.34, 0.34];
+    const lenMul = [1, 1.22, 0.84];
+    for (const off of angleOffsets) {
+      for (const lm of lenMul) {
+        const candidate = createLeafRenderData(path, tipW, ranges, nodeId, off, lm);
+        if (!hasLeafBodyCollision(candidate)) return candidate;
+      }
+    }
+    return createLeafRenderData(path, tipW, ranges, nodeId);
+  }
+
+  function addLeafBodyToCollisionMap(leaf) {
+    const circles = buildLeafCollisionCircles(leaf);
+    for (const c of circles) drawnLeafBodies.push(c);
   }
 
   // ═══════════════════ PATH COMPUTATION ═══════════════════
@@ -371,9 +458,31 @@
       length = rand(ranges.lenMin, ranges.lenMax) * Math.max(0.4, 1 - depth * 0.1);
       tipWidth = width;
     }
-    const endAngle = node._targetAngle !== undefined ? node._targetAngle : startAngle;
+    const baseWidth = isLeaf ? Math.min(width * 0.3, 4) : width;
+    const avgWidth = (baseWidth + tipWidth) * 0.5;
+    let endAngle = node._targetAngle !== undefined ? node._targetAngle : startAngle;
     const curviness = isLeaf ? 0 : rand(ranges.curveMin, ranges.curveMax);
-    const path = computeBranchPath(x0, y0, startAngle, endAngle, length, isLeaf ? Math.min(width * 0.3, 4) : width, tipWidth, curviness, isLeaf ? 0 : rand(-1, 1));
+    let path = computeBranchPath(x0, y0, startAngle, endAngle, length, baseWidth, tipWidth, curviness, isLeaf ? 0 : rand(-1, 1));
+
+    if (depth > 0 && drawnSegments.length > 0 && checkCollision(path.samples, avgWidth)) {
+      const angleOffs = [0, -0.22, 0.22, -0.38, 0.38];
+      for (const off of angleOffs) {
+        const tryAng = endAngle + off;
+        const tryPath = computeBranchPath(x0, y0, startAngle, tryAng, length, baseWidth, tipWidth, curviness, isLeaf ? 0 : rand(-1, 1));
+        if (!checkCollision(tryPath.samples, avgWidth)) {
+          path = tryPath;
+          break;
+        }
+      }
+    }
+    let leafData = null;
+    if (isLeaf) {
+      leafData = fitLeafRenderData(path, tipWidth, ranges, node.id);
+      addPathToCollisionMap(path, avgWidth);
+      addLeafBodyToCollisionMap(leafData);
+    } else {
+      addPathToCollisionMap(path, avgWidth);
+    }
 
     if (!isLeaf) {
       const spread = deg2rad(rand(ranges.angleMin, ranges.angleMax));
@@ -397,6 +506,7 @@
 
     allBranches.push({
       path, path2d, depth, isLeaf, tipWidth, ranges,
+      leafData,
       minT: null
     });
   }
@@ -449,8 +559,25 @@
         }
       }
       if (!path) {
-        path = computeBranchPath(x0, y0, startAngle, baseEndAngle, length, baseWidth, tipWidth, isNodeLeaf ? 0 : rand(ranges.curveMin, ranges.curveMax), isNodeLeaf ? 0 : rand(-1, 1));
+        for (const lenMul of [0.65, 0.45, 1]) {
+          const tryLen = length * lenMul;
+          const tryP = computeBranchPath(x0, y0, startAngle, baseEndAngle, tryLen, baseWidth, tipWidth, isNodeLeaf ? 0 : rand(ranges.curveMin, ranges.curveMax), isNodeLeaf ? 0 : rand(-1, 1));
+          if (!checkCollision(tryP.samples, (baseWidth + tipWidth) / 2)) {
+            path = tryP;
+            break;
+          }
+        }
+        if (!path) {
+          path = computeBranchPath(x0, y0, startAngle, baseEndAngle, length, baseWidth, tipWidth, isNodeLeaf ? 0 : rand(ranges.curveMin, ranges.curveMax), isNodeLeaf ? 0 : rand(-1, 1));
+        }
       }
+    }
+    let leafData = null;
+    if (isNodeLeaf) {
+      leafData = fitLeafRenderData(path, tipWidth, ranges, node.id);
+      addPathToCollisionMap(path, (baseWidth + tipWidth) / 2);
+      addLeafBodyToCollisionMap(leafData);
+    } else if (!prePath) {
       addPathToCollisionMap(path, (baseWidth + tipWidth) / 2);
     }
 
@@ -556,8 +683,18 @@
           }
         }
         if (!bestP) {
-          const len = p.isLeaf ? rand(14, 24) : rand(ranges.lenMin, ranges.lenMax) * Math.max(0.3, 1 - depth * 0.12);
-          bestP = computeBranchPath(p.sx, p.sy, p.baseAngle, p.angle, len, p.bW, p.bW * 0.4, p.isLeaf ? 0 : rand(ranges.curveMin, ranges.curveMax), p.isLeaf ? 0 : rand(-1, 1));
+          const fullLen = p.isLeaf ? rand(14, 24) : rand(ranges.lenMin, ranges.lenMax) * Math.max(0.3, 1 - depth * 0.12);
+          for (const lenMul of [0.6, 1]) {
+            const len = fullLen * lenMul;
+            const tryP = computeBranchPath(p.sx, p.sy, p.baseAngle, p.angle, len, p.bW, p.bW * 0.4, p.isLeaf ? 0 : rand(ranges.curveMin, ranges.curveMax), p.isLeaf ? 0 : rand(-1, 1));
+            if (!checkCollision(tryP.samples, p.bW)) {
+              bestP = tryP;
+              break;
+            }
+          }
+          if (!bestP) {
+            bestP = computeBranchPath(p.sx, p.sy, p.baseAngle, p.angle, fullLen, p.bW, p.bW * 0.4, p.isLeaf ? 0 : rand(ranges.curveMin, ranges.curveMax), p.isLeaf ? 0 : rand(-1, 1));
+          }
         }
         addPathToCollisionMap(bestP, p.bW);
         buildBranchLateral(p.child, 0, 0, 0, 0, depth + 1, ranges, bestP);
@@ -573,6 +710,7 @@
 
     allBranches.push({
       path, path2d, depth, isLeaf: isNodeLeaf, tipWidth, ranges,
+      leafData,
       minT: lateralMinT, maxT: lateralMaxT
     });
   }
@@ -582,7 +720,7 @@
     ctx.save(); ctx.scale(dpr, dpr); ctx.clearRect(0, 0, W, H);
     drawSky(W, H, groundY);
     for (const b of allBranches) {
-      if (b.isLeaf) drawLeafAtTip(b.path, b.tipWidth, b.ranges);
+      if (b.isLeaf) drawLeafAtTip(b.path, b.tipWidth, b.ranges, b.leafData);
       else drawBranchFill(b.path, b.depth);
     }
     if (isDebug && hoveredBranch) renderDebugOverlay(hoveredBranch);
@@ -638,15 +776,15 @@
     ctx.strokeStyle = `rgba(30,20,10,${Math.max(0.05, 0.25 - depth * 0.04)})`;
     ctx.lineWidth = 0.5; ctx.stroke();
   }
-  function drawLeafAtTip(path, tipW, ranges) {
-    const len = rand(1.5, 3.5), ang = path.tipTangentAngle + rand(-0.08, 0.08);
-    const px = path.tipX + Math.sin(ang) * len, py = path.tipY - Math.cos(ang) * len;
+  function drawLeafAtTip(path, tipW, ranges, leafData) {
+    const leaf = leafData || createLeafRenderData(path, tipW, ranges, "fallback");
+    const px = leaf.x, py = leaf.y, ang = leaf.angle;
     ctx.beginPath(); const hw = Math.min(tipW * 0.35, 0.9);
     ctx.moveTo(path.tipX + path.tipNormX * hw, path.tipY + path.tipNormY * hw);
     ctx.lineTo(path.tipX - path.tipNormX * hw, path.tipY - path.tipNormY * hw);
     ctx.lineTo(px, py);
     ctx.closePath(); ctx.fillStyle = "#4e342e"; ctx.fill();
-    drawLeaf(px, py, ang, LEAF_SIZE, ranges.leafHue);
+    drawLeaf(px, py, ang, leaf.size, leaf.hue);
   }
   function drawLeaf(x, y, angle, size, hue) {
     ctx.save(); ctx.translate(x, y); ctx.rotate(angle);
@@ -690,7 +828,7 @@
 
   function generateTree() {
     dpr = window.devicePixelRatio || 1;
-    drawnSegments = []; allBranches = []; hoveredBranch = null;
+    drawnSegments = []; drawnLeafBodies = []; allBranches = []; hoveredBranch = null;
     tree._targetAngle = rand(-0.03, 0.03);
     const W = canvas.width / dpr, H = canvas.height / dpr, groundY = H * 0.87;
     if (currentMode === "division") buildBranchDivision(tree, W / 2, groundY, tree._targetAngle, getRanges().trunkWid, 0, getRanges());
