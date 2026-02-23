@@ -21,6 +21,9 @@
   const modeSelect = document.getElementById("mode-select");
   const sectionLateral = document.getElementById("section-lateral");
   const chkDebugView = document.getElementById("chk-debug-view");
+  const chkSubBranchFade = document.getElementById("chk-subbranch-fade");
+  const rFadeLevel = document.getElementById("r-fade-level");
+  const rvFadeLevel = document.getElementById("rv-fade-level");
 
   let currentMode = modeSelect.value;
   let drawnSegments = []; // {p1, p2, w} for collision
@@ -28,6 +31,8 @@
   let allBranches = [];   // Renderable branch objects
   let hoveredBranch = null;
   let isDebug = false;
+  let isSubBranchFade = false;
+  let fadeFromLevel = 2;
 
   function syncUI() {
     currentMode = modeSelect.value;
@@ -43,6 +48,26 @@
   if (chkDebugView) {
     chkDebugView.addEventListener("change", () => {
       isDebug = chkDebugView.checked;
+      renderScene();
+    });
+  }
+  if (chkSubBranchFade) {
+    chkSubBranchFade.addEventListener("change", () => {
+      isSubBranchFade = chkSubBranchFade.checked;
+      renderScene();
+    });
+  }
+  if (rFadeLevel && rvFadeLevel) {
+    rvFadeLevel.textContent = rFadeLevel.value;
+    fadeFromLevel = +rFadeLevel.value;
+    rFadeLevel.addEventListener("input", () => {
+      rvFadeLevel.textContent = rFadeLevel.value;
+      fadeFromLevel = +rFadeLevel.value;
+      // Moving the slider should always demonstrate fade immediately.
+      if (chkSubBranchFade && !chkSubBranchFade.checked) {
+        chkSubBranchFade.checked = true;
+        isSubBranchFade = true;
+      }
       renderScene();
     });
   }
@@ -719,12 +744,41 @@
     const W = canvas.width / dpr, H = canvas.height / dpr, groundY = H * 0.87;
     ctx.save(); ctx.scale(dpr, dpr); ctx.clearRect(0, 0, W, H);
     drawSky(W, H, groundY);
-    for (const b of allBranches) {
-      if (b.isLeaf) drawLeafAtTip(b.path, b.tipWidth, b.ranges, b.leafData);
-      else drawBranchFill(b.path, b.depth);
+    syncFadeSliderRangeToTreeDepth();
+    const ordered = [...allBranches].sort((a, b) => a.depth - b.depth);
+    for (const b of ordered) {
+      if (!b.isLeaf) drawBranchFill(b.path, b.depth, getBranchOpacity(b.depth));
+    }
+    for (const b of ordered) {
+      if (b.isLeaf) {
+        const opacity = getBranchOpacity(b.depth);
+        drawBranchFill(b.path, b.depth, opacity);
+        drawLeafStemLine(b.path, b.tipWidth, opacity);
+      }
+    }
+    for (const b of ordered) {
+      if (b.isLeaf) drawLeafAtTip(b.path, b.tipWidth, b.ranges, b.leafData, getBranchOpacity(b.depth));
     }
     if (isDebug && hoveredBranch) renderDebugOverlay(hoveredBranch);
     ctx.restore();
+  }
+
+  function getBranchOpacity(depth) {
+    if (!isSubBranchFade) return 1;
+    return depth >= fadeFromLevel ? 0.18 : 1;
+  }
+
+  function syncFadeSliderRangeToTreeDepth() {
+    if (!rFadeLevel || !rvFadeLevel) return;
+    let maxDepth = 1;
+    for (const b of allBranches) maxDepth = Math.max(maxDepth, b.depth || 0);
+    const safeMax = Math.max(1, maxDepth);
+    if (+rFadeLevel.max !== safeMax) rFadeLevel.max = String(safeMax);
+    if (fadeFromLevel > safeMax) {
+      fadeFromLevel = safeMax;
+      rFadeLevel.value = String(safeMax);
+    }
+    rvFadeLevel.textContent = String(fadeFromLevel);
   }
 
   function renderDebugOverlay(branch) {
@@ -765,7 +819,9 @@
     if (found !== hoveredBranch) { hoveredBranch = found; renderScene(); }
   });
 
-  function drawBranchFill(path, depth) {
+  function drawBranchFill(path, depth, opacity = 1) {
+    ctx.save();
+    ctx.globalAlpha = opacity;
     ctx.beginPath();
     ctx.moveTo(path.left[0].x, path.left[0].y);
     for (let i = 1; i < path.left.length; i++) ctx.lineTo(path.left[i].x, path.left[i].y);
@@ -775,18 +831,59 @@
     ctx.fillStyle = "#5d4037"; ctx.fill();
     ctx.strokeStyle = `rgba(30,20,10,${Math.max(0.05, 0.25 - depth * 0.04)})`;
     ctx.lineWidth = 0.5; ctx.stroke();
+    ctx.restore();
   }
-  function drawLeafAtTip(path, tipW, ranges, leafData) {
+  function drawLeafStemLine(path, tipW, opacity = 1) {
+    if (!path || !path.samples || path.samples.length < 2) return;
+    let maxW = tipW || 0;
+    for (const s of path.samples) maxW = Math.max(maxW, s.w || 0);
+    ctx.save();
+    ctx.globalAlpha = opacity;
+    ctx.beginPath();
+    ctx.moveTo(path.samples[0].x, path.samples[0].y);
+    for (let i = 1; i < path.samples.length; i++) ctx.lineTo(path.samples[i].x, path.samples[i].y);
+    ctx.strokeStyle = "#5d4037";
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = Math.max(2.0, maxW * 0.7);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(path.samples[0].x, path.samples[0].y);
+    for (let i = 1; i < path.samples.length; i++) ctx.lineTo(path.samples[i].x, path.samples[i].y);
+    ctx.strokeStyle = "#4e342e";
+    ctx.lineWidth = Math.max(1.5, maxW * 0.4);
+    ctx.stroke();
+    ctx.restore();
+  }
+  function drawLeafAtTip(path, tipW, ranges, leafData, opacity = 1) {
+    ctx.save();
+    ctx.globalAlpha = opacity;
     const leaf = leafData || createLeafRenderData(path, tipW, ranges, "fallback");
     const px = leaf.x, py = leaf.y, ang = leaf.angle;
-    ctx.beginPath(); const hw = Math.min(tipW * 0.35, 0.9);
+    const base = path.samples[0];
+    ctx.beginPath();
+    const hw = Math.max(0.7, leaf.stemHalfWidth || tipW * 0.55);
     ctx.moveTo(path.tipX + path.tipNormX * hw, path.tipY + path.tipNormY * hw);
     ctx.lineTo(path.tipX - path.tipNormX * hw, path.tipY - path.tipNormY * hw);
     ctx.lineTo(px, py);
     ctx.closePath(); ctx.fillStyle = "#4e342e"; ctx.fill();
-    drawLeaf(px, py, ang, leaf.size, leaf.hue);
+    ctx.beginPath();
+    ctx.moveTo(path.tipX, path.tipY);
+    ctx.lineTo(px, py);
+    ctx.strokeStyle = "rgba(44, 27, 20, 0.95)";
+    ctx.lineWidth = Math.max(1.0, hw * 0.9);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(base.x, base.y);
+    ctx.lineTo(px, py);
+    ctx.strokeStyle = "#4e342e";
+    ctx.lineCap = "round";
+    ctx.lineWidth = Math.max(2.0, base.w * 0.75);
+    ctx.stroke();
+    drawLeaf(px, py, ang, leaf.size, leaf.hue, opacity);
+    ctx.restore();
   }
-  function drawLeaf(x, y, angle, size, hue) {
+  function drawLeaf(x, y, angle, size, hue, opacity = 1) {
     ctx.save(); ctx.translate(x, y); ctx.rotate(angle);
     const s = size / 18; ctx.scale(s, s); ctx.translate(0, 9);
     ctx.beginPath(); ctx.moveTo(0, -18);
@@ -794,8 +891,8 @@
     ctx.bezierCurveTo(3.25, -3.15, 1.3, -1.35, 0, 0);
     ctx.bezierCurveTo(-1.3, -1.35, -3.25, -3.15, -3.9, -5.4);
     ctx.bezierCurveTo(-4.55, -7.2, -3.25, -11.7, 0, -18);
-    ctx.closePath(); ctx.fillStyle = "#7cc37d"; ctx.globalAlpha = 0.9; ctx.fill();
-    ctx.globalAlpha = 1.0; ctx.strokeStyle = "rgba(0,0,0,0.15)"; ctx.lineWidth = 0.5; ctx.stroke();
+    ctx.closePath(); ctx.fillStyle = "#7cc37d"; ctx.globalAlpha = 0.9 * opacity; ctx.fill();
+    ctx.globalAlpha = 1.0 * opacity; ctx.strokeStyle = "rgba(0,0,0,0.15)"; ctx.lineWidth = 0.5; ctx.stroke();
     ctx.beginPath(); ctx.moveTo(0, -18); ctx.lineTo(0, 0);
     ctx.strokeStyle = "rgba(0,0,0,0.2)"; ctx.lineWidth = 0.4; ctx.stroke();
     ctx.restore();

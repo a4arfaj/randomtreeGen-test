@@ -63,6 +63,22 @@
                                 outlines</span>
                         </div>
                     </div>
+                    <div class="range-pair">
+                        <label>Debug Fade</label>
+                        <div class="dual-slider single" style="justify-content: flex-start;">
+                            <input type="checkbox" id="chk-subbranch-fade"
+                                style="width: 20px; height: 20px; accent-color: #4CAF50;" />
+                            <span style="margin-left: 8px; font-size: 0.9em; color: rgba(255,255,255,0.7);">Fade
+                                sub-branches + leaves</span>
+                        </div>
+                    </div>
+                    <div class="range-pair">
+                        <label>Fade From Level</label>
+                        <div class="dual-slider single">
+                            <input type="range" id="r-fade-level" min="1" max="6" value="2" />
+                        </div>
+                        <span class="dual-val">L<span id="rv-fade-level">2</span></span>
+                    </div>
                 </section>
                 <div class="panel-divider"></div>
                 <section class="panel-section">
@@ -130,7 +146,7 @@
             <canvas id="tree-canvas"></canvas>
         </main>
     </div>
-    <script src="js/tree.js"></script>
+    <script src="js/tree.js?v=21"></script>
 </body>
 
 </html>
