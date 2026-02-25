@@ -265,6 +265,103 @@
 
   // ═══════════════════ COLLISION LOGIC ═══════════════════
 
+  
+  function getAvgBranchLength(depth, ranges, mode) {
+    if (depth === 0) return ranges.trunkLen;
+    const avgLen = (ranges.lenMin + ranges.lenMax) * 0.5;
+    const decay = mode === "division"
+      ? Math.max(0.4, 1 - depth * 0.1)
+      : Math.max(0.3, 1 - depth * 0.12);
+    return avgLen * decay;
+  }
+
+  function estimateSubtreeSpace(node, depth, ranges, mode) {
+    if (!node) return 0;
+    if (node.children.length === 0) {
+      node._spaceNeed = LEAF_SIZE * 0.8 + 8;
+      node._subtreeDepth = 1;
+      node._leafCount = 1;
+      return node._spaceNeed;
+    }
+
+    const childSpaces = node.children.map(ch => estimateSubtreeSpace(ch, depth + 1, ranges, mode));
+    const totalChildSpace = childSpaces.reduce((a, b) => a + b, 0);
+    const maxChildSpace = childSpaces.length ? Math.max(...childSpaces) : 0;
+    const branchLen = getAvgBranchLength(depth, ranges, mode);
+    const avgAngleDeg = mode === "division"
+      ? (ranges.angleMin + ranges.angleMax) * 0.5
+      : (ranges.latAngleMin + ranges.latAngleMax) * 0.5;
+    const lateralReach = Math.sin(deg2rad(Math.max(10, Math.min(80, avgAngleDeg)))) * branchLen;
+    const ownSpan = Math.max(14, branchLen * 0.2 + lateralReach * 0.9);
+    const fanOut = mode === "division"
+      ? totalChildSpace * 0.55 + maxChildSpace * 0.2
+      : totalChildSpace * 0.45 + maxChildSpace * 0.35;
+
+    node._spaceNeed = ownSpan + fanOut;
+    node._subtreeDepth = 1 + Math.max(0, ...node.children.map(ch => ch._subtreeDepth || 0));
+    node._leafCount = node.children.reduce((acc, ch) => acc + (ch._leafCount || 0), 0);
+    return node._spaceNeed;
+  }
+
+  function prepareSubtreeSpace(root, ranges, mode) {
+    estimateSubtreeSpace(root, 0, ranges, mode);
+  }
+
+  function getChildrenBySpace(node) {
+    return [...node.children].sort((a, b) => (b._spaceNeed || 0) - (a._spaceNeed || 0));
+  }
+
+  function solveBranchPath(opts) {
+    const {
+      x0, y0, startAngle, endAngle, length,
+      baseWidth, tipWidth, isLeaf, ranges,
+      avgWidth, requireCollisionCheck = true
+    } = opts;
+
+    const angleOffsets = [0, -0.14, 0.14, -0.28, 0.28, -0.42, 0.42];
+    const lengthScales = [1, 0.9, 0.78, 0.65, 0.52, 0.4, 0.3];
+    const baseCurve = isLeaf ? 0 : rand(ranges.curveMin, ranges.curveMax);
+    const curveVals = isLeaf
+      ? [0]
+      : [
+        baseCurve,
+        Math.max(ranges.curveMin, baseCurve * 0.65),
+        Math.min(ranges.curveMax, baseCurve * 1.35),
+        ranges.curveMax
+      ];
+    const dirVals = isLeaf ? [0] : [1, -1];
+    const shouldCheck = requireCollisionCheck && drawnSegments.length > 0;
+    let fallback = null;
+
+    for (const aOff of angleOffsets) {
+      const testEndAngle = endAngle + aOff;
+      for (const curve of curveVals) {
+        for (const lenScale of lengthScales) {
+          const testLen = Math.max(6, length * lenScale);
+          for (const cDir of dirVals) {
+            const p = computeBranchPath(
+              x0, y0, startAngle, testEndAngle, testLen,
+              baseWidth, tipWidth, curve, cDir
+            );
+            if (!fallback) fallback = { path: p, endAngle: testEndAngle, isCollisionFree: false };
+            if (!shouldCheck || !checkCollision(p.samples, avgWidth)) {
+              return { path: p, endAngle: testEndAngle, isCollisionFree: true };
+            }
+          }
+        }
+      }
+    }
+
+    return fallback || {
+      path: computeBranchPath(
+        x0, y0, startAngle, endAngle, Math.max(6, length),
+        baseWidth, tipWidth, baseCurve, isLeaf ? 0 : 1
+      ),
+      endAngle,
+      isCollisionFree: false
+    };
+  }
+
   function distToSegmentSquared(p, v, w) {
     const l2 = (v.x - w.x) ** 2 + (v.y - w.y) ** 2;
     if (l2 === 0) return (p.x - v.x) ** 2 + (p.y - v.y) ** 2;
@@ -472,7 +569,6 @@
 
   function buildBranchDivision(node, x0, y0, startAngle, width, depth, ranges) {
     const isLeaf = node.children.length === 0;
-    const n = node.children.length;
     let length, tipWidth;
 
     if (isLeaf) {
@@ -485,21 +581,22 @@
     }
     const baseWidth = isLeaf ? Math.min(width * 0.3, 4) : width;
     const avgWidth = (baseWidth + tipWidth) * 0.5;
-    let endAngle = node._targetAngle !== undefined ? node._targetAngle : startAngle;
-    const curviness = isLeaf ? 0 : rand(ranges.curveMin, ranges.curveMax);
-    let path = computeBranchPath(x0, y0, startAngle, endAngle, length, baseWidth, tipWidth, curviness, isLeaf ? 0 : rand(-1, 1));
+    const targetEndAngle = node._targetAngle !== undefined ? node._targetAngle : startAngle;
+    const solved = solveBranchPath({
+      x0,
+      y0,
+      startAngle,
+      endAngle: targetEndAngle,
+      length,
+      baseWidth,
+      tipWidth,
+      isLeaf,
+      ranges,
+      avgWidth,
+      requireCollisionCheck: depth > 0
+    });
+    const path = solved.path;
 
-    if (depth > 0 && drawnSegments.length > 0 && checkCollision(path.samples, avgWidth)) {
-      const angleOffs = [0, -0.22, 0.22, -0.38, 0.38];
-      for (const off of angleOffs) {
-        const tryAng = endAngle + off;
-        const tryPath = computeBranchPath(x0, y0, startAngle, tryAng, length, baseWidth, tipWidth, curviness, isLeaf ? 0 : rand(-1, 1));
-        if (!checkCollision(tryPath.samples, avgWidth)) {
-          path = tryPath;
-          break;
-        }
-      }
-    }
     let leafData = null;
     if (isLeaf) {
       leafData = fitLeafRenderData(path, tipWidth, ranges, node.id);
@@ -510,15 +607,18 @@
     }
 
     if (!isLeaf) {
+      const orderedChildren = getChildrenBySpace(node);
+      const n = orderedChildren.length;
       const spread = deg2rad(rand(ranges.angleMin, ranges.angleMax));
       const childW = tipWidth / n;
       for (let i = 0; i < n; i++) {
+        const child = orderedChildren[i];
         const offset = -tipWidth / 2 + i * childW + childW / 2;
         const cx = path.tipX + path.tipNormX * offset, cy = path.tipY + path.tipNormY * offset;
         const cAngle = n === 1 ? path.tipTangentAngle + rand(-spread * 0.15, spread * 0.15)
           : path.tipTangentAngle - spread / 2 + spread * (i / (n - 1));
-        node.children[i]._targetAngle = cAngle + rand(-0.04, 0.04);
-        buildBranchDivision(node.children[i], cx, cy, path.tipTangentAngle, childW, depth + 1, ranges);
+        child._targetAngle = cAngle + rand(-0.04, 0.04);
+        buildBranchDivision(child, cx, cy, path.tipTangentAngle, childW, depth + 1, ranges);
       }
     }
 
@@ -560,42 +660,21 @@
         tipWidth = (tipChild && tipChild.children.length === 0) ? Math.min(width * 0.3, 3.5) : width * (depth === 0 ? 0.8 : 0.45);
       }
 
-      const candidates = [
-        [1.0, 0, 1.5], [1.0, 0, -1.5], [0.85, 0, 1.0], [1.2, 0, 1.0], [1.0, 0.3, 1.0], [1.0, -0.3, 1.0]
-      ];
       const baseEndAngle = node._targetAngle !== undefined ? node._targetAngle : startAngle + rand(-0.08, 0.08);
-
-      if (depth > 0 && drawnSegments.length > 0) {
-        const normalCurve = isNodeLeaf ? 0 : rand(ranges.curveMin, ranges.curveMax);
-        const normalP = computeBranchPath(x0, y0, startAngle, baseEndAngle, length, baseWidth, tipWidth, normalCurve, isNodeLeaf ? 0 : rand(-1, 1));
-        if (!checkCollision(normalP.samples, (baseWidth + tipWidth) / 2)) {
-          path = normalP;
-        } else {
-          for (const [lMul, aOff, cMul] of candidates) {
-            const tLen = length * lMul;
-            const tAng = baseEndAngle + aOff;
-            const tCurve = isNodeLeaf ? 0 : rand(ranges.curveMin, ranges.curveMax) * cMul;
-            const tDir = isNodeLeaf ? 0 : rand(-1, 1);
-            const testP = computeBranchPath(x0, y0, startAngle, tAng, tLen, baseWidth, tipWidth, tCurve, tDir);
-            if (!checkCollision(testP.samples, (baseWidth + tipWidth) / 2)) {
-              path = testP; break;
-            }
-          }
-        }
-      }
-      if (!path) {
-        for (const lenMul of [0.65, 0.45, 1]) {
-          const tryLen = length * lenMul;
-          const tryP = computeBranchPath(x0, y0, startAngle, baseEndAngle, tryLen, baseWidth, tipWidth, isNodeLeaf ? 0 : rand(ranges.curveMin, ranges.curveMax), isNodeLeaf ? 0 : rand(-1, 1));
-          if (!checkCollision(tryP.samples, (baseWidth + tipWidth) / 2)) {
-            path = tryP;
-            break;
-          }
-        }
-        if (!path) {
-          path = computeBranchPath(x0, y0, startAngle, baseEndAngle, length, baseWidth, tipWidth, isNodeLeaf ? 0 : rand(ranges.curveMin, ranges.curveMax), isNodeLeaf ? 0 : rand(-1, 1));
-        }
-      }
+      const solved = solveBranchPath({
+        x0,
+        y0,
+        startAngle,
+        endAngle: baseEndAngle,
+        length,
+        baseWidth,
+        tipWidth,
+        isLeaf: isNodeLeaf,
+        ranges,
+        avgWidth: (baseWidth + tipWidth) / 2,
+        requireCollisionCheck: depth > 0
+      });
+      path = solved.path;
     }
     let leafData = null;
     if (isNodeLeaf) {
@@ -606,17 +685,21 @@
       addPathToCollisionMap(path, (baseWidth + tipWidth) / 2);
     }
 
-    const branches = node.children.filter(c => c.children.length > 0);
-    const leaves = node.children.filter(c => c.children.length === 0);
+    const branches = node.children
+      .filter(c => c.children.length > 0)
+      .sort((a, b) => (b._spaceNeed || 0) - (a._spaceNeed || 0));
+    const leaves = node.children
+      .filter(c => c.children.length === 0)
+      .sort((a, b) => (b._spaceNeed || 0) - (a._spaceNeed || 0));
     let tipChild, sideChildren;
     if (branches.length > 0) {
       tipChild = branches[0];
-      sideChildren = [...leaves, ...branches.slice(1)];
+      sideChildren = [...branches.slice(1), ...leaves];
     } else {
       tipChild = leaves[0];
       sideChildren = leaves.slice(1);
     }
-    sideChildren.sort((a, b) => (a.children.length === 0 ? -1 : 1) - (b.children.length === 0 ? -1 : 1));
+    sideChildren.sort((a, b) => (b._spaceNeed || 0) - (a._spaceNeed || 0));
 
     if (tipChild && !isNodeLeaf) {
       tipChild._targetAngle = path.tipTangentAngle + rand(-0.1, 0.1);
@@ -626,7 +709,8 @@
     let lateralMinT = ranges.latMinHeight, lateralMaxT = 0.92;
     const num = sideChildren.length;
     if (num > 0 && !isNodeLeaf) {
-      const needed = num * Math.max(baseWidth * ranges.latWidthRatio * 0.8, 5) * 0.9;
+      const totalSpaceNeed = sideChildren.reduce((acc, c) => acc + Math.max(8, (c._spaceNeed || 20) * 0.28), 0);
+      const needed = totalSpaceNeed * Math.max(0.55, ranges.latWidthRatio);
       const avail = length * (lateralMaxT - lateralMinT);
       if (needed > avail) lateralMinT = Math.max(0.15, lateralMaxT - needed / length);
 
@@ -639,9 +723,12 @@
         let side = lastSide * -1; lastSide = side;
         const child = sideChildren[i];
         const isLeaf = child.children.length === 0;
+        const spaceNeed = child._spaceNeed || (isLeaf ? 20 : 42);
         const bW = Math.min(s.w * ranges.latWidthRatio, isLeaf ? 5.0 : 999);
         const inset = isLeaf ? 0.95 : 0.15;
-        const estLen = isLeaf ? 20 : (length * 0.6);
+        const estLen = isLeaf
+          ? Math.max(16, Math.min(30, spaceNeed * 0.45))
+          : Math.max(length * 0.45, Math.min(length * 0.95, spaceNeed * 0.55));
         const angleD = rand(ranges.latAngleMin, ranges.latAngleMax);
 
         let bestAng = s.angle + side * deg2rad(angleD);
@@ -656,7 +743,7 @@
 
         const sx = s.x + s.normX * side * (s.w / 2) * inset;
         const sy = s.y + s.normY * side * (s.w / 2) * inset;
-        plans.push({ child, isLeaf, sx, sy, baseAngle: s.angle, angle: bestAng, side, estLen, bW, t, bend: 0 });
+        plans.push({ child, isLeaf, sx, sy, baseAngle: s.angle, angle: bestAng, side, estLen, bW, t, spaceNeed, bend: 0 });
       }
 
       for (let iter = 0; iter < 6; iter++) {
@@ -680,49 +767,55 @@
         if (!changed) break;
       }
 
-      const candidatesSide = [[1, 0, 1], [1, 0, -1], [1.2, 0, 1], [0.85, 0, 1], [1, 0.25, 1], [1, -0.25, 1]];
       for (let p of plans) {
-        let bestP = null;
-        if (depth > 0 && drawnSegments.length > 0) {
-          for (const [lMul, aOff, cMul] of candidatesSide) {
-            const len = (p.isLeaf ? rand(14, 24) : rand(ranges.lenMin, ranges.lenMax) * Math.max(0.3, 1 - depth * 0.12)) * lMul;
-            const cAng = p.angle + aOff;
-            const curve = (p.isLeaf ? 0 : rand(ranges.curveMin, ranges.curveMax)) * cMul;
-            const tp = computeBranchPath(p.sx, p.sy, p.baseAngle, cAng, len, p.bW, p.bW * 0.4, curve, p.isLeaf ? 0 : rand(-1, 1));
-            if (!checkCollision(tp.samples, p.bW)) { bestP = tp; p.child._targetAngle = cAng; break; }
-          }
-          if (!bestP) {
-            const s = samplePathAt(path.samples, p.t);
-            const nSide = p.side * -1;
-            const nIn = p.isLeaf ? 0.95 : 0.15;
-            const nsx = s.x + s.normX * nSide * (s.w / 2) * nIn;
-            const nsy = s.y + s.normY * nSide * (s.w / 2) * nIn;
-            const bAng = s.angle + nSide * deg2rad(rand(ranges.latAngleMin, ranges.latAngleMax));
-            for (const [lMul, aOff, cMul] of candidatesSide) {
-              const len = (p.isLeaf ? rand(14, 24) : rand(ranges.lenMin, ranges.lenMax) * Math.max(0.3, 1 - depth * 0.12)) * lMul;
-              const cAng = bAng + aOff;
-              const curve = (p.isLeaf ? 0 : rand(ranges.curveMin, ranges.curveMax)) * cMul;
-              const tp = computeBranchPath(nsx, nsy, s.angle, cAng, len, p.bW, p.bW * 0.4, curve, p.isLeaf ? 0 : rand(-1, 1));
-              if (!checkCollision(tp.samples, p.bW)) { bestP = tp; p.child._targetAngle = cAng; break; }
-            }
-          }
+        const fullLen = p.isLeaf
+          ? Math.max(rand(14, 24), p.spaceNeed * 0.35)
+          : Math.max(
+            rand(ranges.lenMin, ranges.lenMax) * Math.max(0.3, 1 - depth * 0.12),
+            p.spaceNeed * 0.45
+          );
+        const tipW = p.isLeaf ? Math.max(0.5, p.bW * 0.35) : p.bW * 0.4;
+
+        let solved = solveBranchPath({
+          x0: p.sx,
+          y0: p.sy,
+          startAngle: p.baseAngle,
+          endAngle: p.angle,
+          length: fullLen,
+          baseWidth: p.bW,
+          tipWidth: tipW,
+          isLeaf: p.isLeaf,
+          ranges,
+          avgWidth: p.bW,
+          requireCollisionCheck: depth > 0
+        });
+
+        if (!solved.isCollisionFree) {
+          const s = samplePathAt(path.samples, p.t);
+          const nSide = p.side * -1;
+          const nIn = p.isLeaf ? 0.95 : 0.15;
+          const nsx = s.x + s.normX * nSide * (s.w / 2) * nIn;
+          const nsy = s.y + s.normY * nSide * (s.w / 2) * nIn;
+          const altAngle = s.angle + nSide * deg2rad(rand(ranges.latAngleMin, ranges.latAngleMax));
+          const mirrorSolved = solveBranchPath({
+            x0: nsx,
+            y0: nsy,
+            startAngle: s.angle,
+            endAngle: altAngle,
+            length: fullLen,
+            baseWidth: p.bW,
+            tipWidth: tipW,
+            isLeaf: p.isLeaf,
+            ranges,
+            avgWidth: p.bW,
+            requireCollisionCheck: true
+          });
+          if (mirrorSolved.isCollisionFree) solved = mirrorSolved;
         }
-        if (!bestP) {
-          const fullLen = p.isLeaf ? rand(14, 24) : rand(ranges.lenMin, ranges.lenMax) * Math.max(0.3, 1 - depth * 0.12);
-          for (const lenMul of [0.6, 1]) {
-            const len = fullLen * lenMul;
-            const tryP = computeBranchPath(p.sx, p.sy, p.baseAngle, p.angle, len, p.bW, p.bW * 0.4, p.isLeaf ? 0 : rand(ranges.curveMin, ranges.curveMax), p.isLeaf ? 0 : rand(-1, 1));
-            if (!checkCollision(tryP.samples, p.bW)) {
-              bestP = tryP;
-              break;
-            }
-          }
-          if (!bestP) {
-            bestP = computeBranchPath(p.sx, p.sy, p.baseAngle, p.angle, fullLen, p.bW, p.bW * 0.4, p.isLeaf ? 0 : rand(ranges.curveMin, ranges.curveMax), p.isLeaf ? 0 : rand(-1, 1));
-          }
-        }
-        addPathToCollisionMap(bestP, p.bW);
-        buildBranchLateral(p.child, 0, 0, 0, 0, depth + 1, ranges, bestP);
+
+        p.child._targetAngle = solved.endAngle;
+        addPathToCollisionMap(solved.path, p.bW);
+        buildBranchLateral(p.child, 0, 0, 0, 0, depth + 1, ranges, solved.path);
       }
     }
 
@@ -928,8 +1021,15 @@
     drawnSegments = []; drawnLeafBodies = []; allBranches = []; hoveredBranch = null;
     tree._targetAngle = rand(-0.03, 0.03);
     const W = canvas.width / dpr, H = canvas.height / dpr, groundY = H * 0.87;
-    if (currentMode === "division") buildBranchDivision(tree, W / 2, groundY, tree._targetAngle, getRanges().trunkWid, 0, getRanges());
-    else buildBranchLateral(tree, W / 2, groundY, tree._targetAngle, getLateralRanges().trunkWid, 0, getLateralRanges());
+    if (currentMode === "division") {
+      const ranges = getRanges();
+      prepareSubtreeSpace(tree, ranges, "division");
+      buildBranchDivision(tree, W / 2, groundY, tree._targetAngle, ranges.trunkWid, 0, ranges);
+    } else {
+      const ranges = getLateralRanges();
+      prepareSubtreeSpace(tree, ranges, "lateral");
+      buildBranchLateral(tree, W / 2, groundY, tree._targetAngle, ranges.trunkWid, 0, ranges);
+    }
     renderScene();
   }
 
@@ -950,3 +1050,4 @@
   });
   syncUI(); resizeCanvas();
 })();
+
