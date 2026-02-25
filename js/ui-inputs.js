@@ -28,6 +28,7 @@ export const R = {
     trunkLen: document.getElementById("r-trunk-len"),
     trunkWid: document.getElementById("r-trunk-wid"),
     leafHue: document.getElementById("r-leaf-hue"),
+    widthRatio: document.getElementById("r-width-ratio"),
 };
 
 export const RV = {
@@ -40,20 +41,19 @@ export const RV = {
     trunkLen: document.getElementById("rv-trunk-len"),
     trunkWid: document.getElementById("rv-trunk-wid"),
     leafHue: document.getElementById("rv-leaf-hue"),
+    widthRatio: document.getElementById("rv-width-ratio"),
 };
 
 export const RL = {
     minHeight: document.getElementById("r-lat-min-height"),
     angleMin: document.getElementById("r-lat-angle-min"),
     angleMax: document.getElementById("r-lat-angle-max"),
-    widthRatio: document.getElementById("r-lat-width-ratio"),
 };
 
 export const RLV = {
     minHeight: document.getElementById("rv-lat-min-height"),
     angleMin: document.getElementById("rv-lat-angle-min"),
     angleMax: document.getElementById("rv-lat-angle-max"),
-    widthRatio: document.getElementById("rv-lat-width-ratio"),
 };
 
 export const RD = {
@@ -62,10 +62,6 @@ export const RD = {
     gridRows: document.getElementById("r-dot-rows"),
     chainMin: document.getElementById("r-dot-chain-min"),
     chainMax: document.getElementById("r-dot-chain-max"),
-    dotLeafHue: document.getElementById("r-dot-leaf-hue"),
-    dotTrunkWid: document.getElementById("r-dot-trunk-wid"),
-    dotCurveMin: document.getElementById("r-dot-curve-min"),
-    dotCurveMax: document.getElementById("r-dot-curve-max"),
     dotShape: document.getElementById("r-dot-shape"),
     showDots: document.getElementById("chk-show-dots"),
 };
@@ -76,10 +72,6 @@ export const RDV = {
     gridRows: document.getElementById("rv-dot-rows"),
     chainMin: document.getElementById("rv-dot-chain-min"),
     chainMax: document.getElementById("rv-dot-chain-max"),
-    dotLeafHue: document.getElementById("rv-dot-leaf-hue"),
-    dotTrunkWid: document.getElementById("rv-dot-trunk-wid"),
-    dotCurveMin: document.getElementById("rv-dot-curve-min"),
-    dotCurveMax: document.getElementById("rv-dot-curve-max"),
 };
 
 // ── Wire up live value display ──
@@ -96,7 +88,7 @@ Object.keys(RL).forEach((k) => {
         });
 });
 
-const rdKeys = ["dotSpacing", "gridCols", "gridRows", "chainMin", "chainMax", "dotLeafHue", "dotTrunkWid", "dotCurveMin", "dotCurveMax"];
+const rdKeys = ["dotSpacing", "gridCols", "gridRows", "chainMin", "chainMax"];
 rdKeys.forEach((k) => {
     if (RD[k] && RDV[k])
         RD[k].addEventListener("input", () => {
@@ -125,6 +117,7 @@ export function getRanges() {
         trunkLen: +R.trunkLen.value,
         trunkWid: +R.trunkWid.value,
         leafHue: +R.leafHue.value,
+        widthRatio: +R.widthRatio.value / 100,
     };
 }
 
@@ -138,14 +131,10 @@ export function getLateralRanges() {
         latMinHeight: +RL.minHeight.value / 100,
         latAngleMin: aMin,
         latAngleMax: aMax,
-        latWidthRatio: +RL.widthRatio.value / 100,
     };
 }
 
 export function getDotRanges() {
-    let cMin = +(RD.dotCurveMin?.value ?? 10);
-    let cMax = +(RD.dotCurveMax?.value ?? 50);
-    if (cMin > cMax) [cMin, cMax] = [cMax, cMin];
     let chainMin = +(RD.chainMin?.value ?? 2);
     let chainMax = +(RD.chainMax?.value ?? 6);
     if (chainMin > chainMax) [chainMin, chainMax] = [chainMax, chainMin];
@@ -155,10 +144,12 @@ export function getDotRanges() {
         gridRows: +(RD.gridRows?.value ?? 20),
         dotMinLen: chainMin,
         dotMaxLen: chainMax,
-        leafHue: +(RD.dotLeafHue?.value ?? 115),
-        trunkWid: +(RD.dotTrunkWid?.value ?? 14),
-        curveMin: cMin / 100,
-        curveMax: cMax / 100,
+        leafHue: +(R.leafHue?.value ?? 115),
+        trunkWid: +(R.trunkWid?.value ?? 14),
+        trunkLen: +(R.trunkLen?.value ?? 100),
+        widthRatio: +(R.widthRatio?.value ?? 74) / 100,
+        curveMin: 0,
+        curveMax: 0,
         shape: RD.dotShape?.value ?? "circle",
         showDots: RD.showDots?.checked ?? false,
     };

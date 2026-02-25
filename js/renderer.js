@@ -193,13 +193,19 @@ export function renderDebugOverlay(branch, stroke = "#FFFF00", showZone = true) 
     ctx.lineWidth = 1;
     ctx.strokeStyle = stroke;
     ctx.filter = "drop-shadow(0 0 2px black)";
-    ctx.beginPath();
-    ctx.moveTo(branch.path.left[0].x, branch.path.left[0].y);
-    for (let p of branch.path.left) ctx.lineTo(p.x, p.y);
-    for (let i = branch.path.right.length - 1; i >= 0; i--)
-        ctx.lineTo(branch.path.right[i].x, branch.path.right[i].y);
-    ctx.closePath();
-    ctx.stroke();
+    if (branch.isLeaf && branch.leafData) {
+        ctx.beginPath();
+        ctx.arc(branch.leafData.x, branch.leafData.y, branch.leafData.size * 1.0, 0, Math.PI * 2);
+        ctx.stroke();
+    } else {
+        ctx.beginPath();
+        ctx.moveTo(branch.path.left[0].x, branch.path.left[0].y);
+        for (let p of branch.path.left) ctx.lineTo(p.x, p.y);
+        for (let i = branch.path.right.length - 1; i >= 0; i--)
+            ctx.lineTo(branch.path.right[i].x, branch.path.right[i].y);
+        ctx.closePath();
+        ctx.stroke();
+    }
     ctx.filter = "none";
     if (showZone && branch.minT != null) {
         const minIdx = Math.floor(

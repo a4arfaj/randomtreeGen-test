@@ -259,13 +259,13 @@
       latMinHeight: +RL.minHeight.value / 100,
       latAngleMin: aMin,
       latAngleMax: aMax,
-      latWidthRatio: +RL.widthRatio.value / 100,
+      widthRatio: +RL.widthRatio.value / 100,
     };
   }
 
   // ═══════════════════ COLLISION LOGIC ═══════════════════
 
-  
+
   function getAvgBranchLength(depth, ranges, mode) {
     if (depth === 0) return ranges.trunkLen;
     const avgLen = (ranges.lenMin + ranges.lenMax) * 0.5;
@@ -710,7 +710,7 @@
     const num = sideChildren.length;
     if (num > 0 && !isNodeLeaf) {
       const totalSpaceNeed = sideChildren.reduce((acc, c) => acc + Math.max(8, (c._spaceNeed || 20) * 0.28), 0);
-      const needed = totalSpaceNeed * Math.max(0.55, ranges.latWidthRatio);
+      const needed = totalSpaceNeed * Math.max(0.55, ranges.widthRatio);
       const avail = length * (lateralMaxT - lateralMinT);
       if (needed > avail) lateralMinT = Math.max(0.15, lateralMaxT - needed / length);
 
@@ -724,7 +724,7 @@
         const child = sideChildren[i];
         const isLeaf = child.children.length === 0;
         const spaceNeed = child._spaceNeed || (isLeaf ? 20 : 42);
-        const bW = Math.min(s.w * ranges.latWidthRatio, isLeaf ? 5.0 : 999);
+        const bW = Math.min(s.w * ranges.widthRatio, isLeaf ? 5.0 : 999);
         const inset = isLeaf ? 0.95 : 0.15;
         const estLen = isLeaf
           ? Math.max(16, Math.min(30, spaceNeed * 0.45))

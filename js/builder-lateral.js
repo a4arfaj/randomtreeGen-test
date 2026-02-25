@@ -140,7 +140,7 @@ export function buildBranchLateral(
             (acc, c) => acc + Math.max(8, (c._spaceNeed || 20) * 0.28),
             0
         );
-        const needed = totalSpaceNeed * Math.max(0.55, ranges.latWidthRatio);
+        const needed = totalSpaceNeed * Math.max(0.55, ranges.widthRatio);
         const avail = length * (lateralMaxT - lateralMinT);
         if (needed > avail)
             lateralMinT = Math.max(0.15, lateralMaxT - needed / length);
@@ -160,7 +160,7 @@ export function buildBranchLateral(
             const isLeaf = child.children.length === 0;
             const spaceNeed = child._spaceNeed || (isLeaf ? 20 : 42);
             const bW = Math.min(
-                s.w * ranges.latWidthRatio,
+                s.w * ranges.widthRatio,
                 isLeaf ? 5.0 : 999
             );
             const inset = isLeaf ? 0.95 : 0.15;

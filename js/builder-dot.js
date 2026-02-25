@@ -54,22 +54,15 @@ function subtreeStats(node) {
  */
 export function tuneDotRangesForTree(root, ranges, totalDots) {
     const stats = subtreeStats(root);
-    const branchCount = Math.max(1, stats.branchNodes);
-    const freeForBranches = Math.max(0, totalDots - stats.leaves);
-    const avgLenBudget = freeForBranches / branchCount;
 
     const minIn = Math.max(2, ranges.dotMinLen || 2);
     const maxIn = Math.max(minIn, ranges.dotMaxLen || 6);
 
-    const budgetMin = clamp(Math.floor(avgLenBudget * 0.7), 2, 12);
-    const budgetMax = clamp(Math.ceil(avgLenBudget * 1.2), budgetMin, 18);
-
     return {
         ...ranges,
-        dotMinLen: clamp(minIn, 2, budgetMax),
-        dotMaxLen: clamp(maxIn, Math.max(minIn, budgetMin), budgetMax),
+        dotMinLen: minIn,
+        dotMaxLen: maxIn,
         _stats: stats,
-        _avgLenBudget: avgLenBudget,
     };
 }
 
@@ -126,22 +119,45 @@ export function generateDotGrid(cx, cy, dotSpacing, cols, rows, shape) {
     return dots;
 }
 
-function shufflePreferred(pdx, pdy) {
+function shufflePreferred(pdx, pdy, isTip = false, progress = 1.0, origDx = 0, origDy = -1) {
     const scored = DIR8.map((d) => {
         // Base: prefer current direction
         let score = -(d.dx * pdx + d.dy * pdy);
-        // Heavily penalise going backward / downward (dy>0 is down on screen)
-        if (d.dy > 0) score += 2.5;          // strong downward penalty
-        if (d.dy < 0) score -= 0.4;          // slight upward bonus
-        // Small noise for variety
-        score += rand(-0.25, 0.25);
+
+        if (isTip) {
+            if (progress < 0.5) {
+                // Tip branches forced to go straight in their initial direction for the first half
+                if (d.dx === origDx && d.dy === origDy) score -= 20.0;
+                else {
+                    score += 5.0; // penalty for deviation
+                    if (d.dy > 0) score += 20.0; // strict no downward
+                }
+            } else {
+                // Later half: can gently bend but mostly up
+                if (d.dy === -1) score -= 1.5;    // Strong upward bonus
+                if (d.dy === 0) score += 0.8;     // Mild penalty for going sideways
+                if (d.dy === 1) score += 6.0;     // Huge penalty for going downward
+
+                // Penalize sharp turns (where alignment is 0 or negative)
+                const alignment = d.dx * pdx + d.dy * pdy;
+                if (alignment <= 0) score += 5.0; // Avoid sharp 90-degree or 180-degree turns
+
+                score += rand(-0.08, 0.08); // Very small variety
+            }
+        } else {
+            // Heavily penalise going backward / downward (dy>0 is down on screen)
+            if (d.dy > 0) score += 2.5;          // strong downward penalty
+            if (d.dy < 0) score -= 0.4;          // slight upward bonus
+            // Small noise for variety
+            score += rand(-0.25, 0.25);
+        }
         return { d, score };
     });
     scored.sort((a, b) => a.score - b.score);
     return scored.map((s) => s.d);
 }
 
-function walkChain(dots, dotMap, startIdx, preferredDx, preferredDy, length) {
+function walkChain(dots, dotMap, startIdx, preferredDx, preferredDy, length, isTrunk = false, isTip = false) {
     const chain = [startIdx];
     let curIdx = startIdx;
     let dx = preferredDx;
@@ -149,12 +165,26 @@ function walkChain(dots, dotMap, startIdx, preferredDx, preferredDy, length) {
 
     for (let step = 1; step < length; step++) {
         const cur = dots[curIdx];
-        const dirs = shufflePreferred(dx, dy);
+        const progress = step / length;
+
+        // If trunk, strictly force it to go straight up (dx=0, dy=-1)
+        const dirs = isTrunk ? [{ dx: 0, dy: -1 }] : shufflePreferred(dx, dy, isTip, progress, preferredDx, preferredDy);
+
         let found = false;
         for (const d of dirs) {
             const key = `${cur.col + d.dx},${cur.row + d.dy}`;
             const nIdx = dotMap.get(key);
+
             if (nIdx !== undefined && !dots[nIdx].occupied) {
+                // Prevent cross-diagonals: if moving diagonally, check common adjacent orthogonals
+                if (Math.abs(d.dx) === 1 && Math.abs(d.dy) === 1) {
+                    const o1Idx = dotMap.get(`${cur.col + d.dx},${cur.row}`);
+                    const o2Idx = dotMap.get(`${cur.col},${cur.row + d.dy}`);
+                    const o1Occ = o1Idx !== undefined ? dots[o1Idx].occupied : false;
+                    const o2Occ = o2Idx !== undefined ? dots[o2Idx].occupied : false;
+                    if (o1Occ && o2Occ) continue; // Forbid diagonal cross!
+                }
+
                 chain.push(nIdx);
                 dx = d.dx;
                 dy = d.dy;
@@ -307,13 +337,26 @@ function findChainAdjacentFreeDot(dots, dotMap, chain, usedSpawn, mainDx, mainDy
     return scored[0] || null;
 }
 
-function buildLeafAtDot(dot, leafHue, dotSpacing, depth = 0) {
-    const angle = rand(0, Math.PI * 2);
+function buildLeafAtDot(dot, leafHue, dotSpacing, depth = 0, prefDir = { dx: 0, dy: -1 }, isTip = true, parentW = 0) {
+    let baseAngle = Math.atan2(prefDir.dx, -prefDir.dy);
+    if (!isTip) {
+        const side = Math.random() < 0.5 ? 1 : -1;
+        baseAngle += side * rand(Math.PI / 2 - 0.5, Math.PI / 2 + 0.5);
+    } else {
+        baseAngle += rand(-0.2, 0.2);
+    }
+    const angle = baseAngle;
     const r = Math.max(8, dotSpacing * 0.34) * clamp(1 - depth * 0.02, 0.75, 1);
-    const start = { x: dot.x, y: dot.y };
+
+    // Offset the stem start to clear the thick parent body
+    const offset = Math.max(0, parentW / 2 - 1);
+    const start = {
+        x: dot.x + Math.sin(angle) * offset,
+        y: dot.y - Math.cos(angle) * offset
+    };
     const tip = {
-        x: dot.x + Math.sin(angle) * r * 0.5,
-        y: dot.y - Math.cos(angle) * r * 0.5,
+        x: start.x + Math.sin(angle) * r,
+        y: start.y - Math.cos(angle) * r,
     };
     const pts = [
         { x: start.x, y: start.y, w: Math.max(1.2, dotSpacing * 0.07), t: 0 },
@@ -328,8 +371,8 @@ function buildLeafAtDot(dot, leafHue, dotSpacing, depth = 0) {
         tipWidth: 0.8,
         ranges: { leafHue, curveMin: 0, curveMax: 0 },
         leafData: {
-            x: dot.x,
-            y: dot.y,
+            x: tip.x,
+            y: tip.y,
             angle,
             size: r * 3.0,
             hue: leafHue,
@@ -340,36 +383,6 @@ function buildLeafAtDot(dot, leafHue, dotSpacing, depth = 0) {
     };
 }
 
-/**
- * Build a trunk stem from ground to first dot so the trunk base is always visible.
- * Uses multiple points for a smooth taper.
- */
-export function buildGroundStemToDot(x, groundY, dot, trunkWid, allBranches) {
-    if (!dot) return;
-    const NUM = 6;
-    const pts = [];
-    for (let i = 0; i <= NUM; i++) {
-        const t = i / NUM;
-        pts.push({
-            x: lerp(x, dot.x, t),
-            y: lerp(groundY, dot.y, t),
-            w: lerp(trunkWid, Math.max(3, trunkWid * 0.72), t),
-        });
-    }
-    const path = buildPathFromPts(pts);
-    allBranches.push({
-        path,
-        path2d: makePath2D(path),
-        nodeId: null,
-        depth: 0,
-        isLeaf: false,
-        tipWidth: Math.max(2, trunkWid * 0.45),
-        ranges: null,
-        leafData: null,
-        minT: null,
-        maxT: null,
-    });
-}
 
 /**
  * Main entry: build the dot-grid tree recursively.
@@ -383,15 +396,18 @@ export function buildBranchDot(
     ranges,
     allBranches,
     dotSpacing,
-    prefDir
+    prefDir,
+    allowOccupiedStart = false,
+    isTip = true,
+    parentW = 0
 ) {
     const isLeaf = node.children.length === 0;
     const startDot = dots[startDotIdx];
-    if (!startDot || startDot.occupied) return;
+    if (!startDot || (startDot.occupied && !allowOccupiedStart)) return;
 
     if (isLeaf) {
         startDot.occupied = true;
-        const leafBranch = buildLeafAtDot(startDot, ranges.leafHue, dotSpacing, depth);
+        const leafBranch = buildLeafAtDot(startDot, ranges.leafHue, dotSpacing, depth, prefDir, isTip, parentW);
         leafBranch.depth = depth;
         leafBranch.nodeId = node.id;
         allBranches.push(leafBranch);
@@ -402,27 +418,21 @@ export function buildBranchDot(
     const minLen = Math.max(2, ranges.dotMinLen || 2);
     const maxLen = Math.max(minLen + 1, ranges.dotMaxLen || 6);
 
-    const loadBoost = clamp(Math.round(Math.sqrt(selfStats.total) * 0.7), 0, 3);
-    const depthShrink = clamp(depth - 1, 0, 6);
-    const baseTarget = clamp(
-        Math.round(rand(minLen, maxLen)) + loadBoost - depthShrink,
-        minLen,
-        maxLen
-    );
+    const baseTarget = Math.round(rand(minLen, maxLen));
     const chainLen =
         depth === 0
-            ? clamp(Math.max(baseTarget, Math.min(maxLen, minLen + 2)), minLen, maxLen)
+            ? Math.max(2, Math.round((ranges.trunkLen || 100) / dotSpacing))
             : baseTarget;
 
-    const chain = walkChain(dots, dotMap, startDotIdx, prefDir.dx, prefDir.dy, chainLen);
+    const chain = walkChain(dots, dotMap, startDotIdx, prefDir.dx, prefDir.dy, chainLen, depth === 0, isTip);
     for (const idx of chain) dots[idx].occupied = true;
 
     const baseW =
         depth === 0
             ? ranges.trunkWid
-            : Math.max(2.2, ranges.trunkWid * Math.pow(0.74, depth));
-    const tipW = Math.max(0.9, baseW * 0.52);
-    const curviness = rand(ranges.curveMin, ranges.curveMax);
+            : Math.max(2.2, ranges.trunkWid * Math.pow(ranges.widthRatio || 0.74, depth));
+    const tipW = Math.max(0.9, baseW * (ranges.widthRatio || 0.52));
+    const curviness = 0;
     const curveDir = Math.random() < 0.5 ? 1 : -1;
     const path = chainToPath(chain, dots, dotSpacing, baseW, tipW, curviness, curveDir);
 
@@ -453,100 +463,65 @@ export function buildBranchDot(
         (a, b) => subtreeStats(b).total - subtreeStats(a).total
     );
 
-    const candidates = [];
-    for (const d of DIR8) {
-        const key = `${tipDot.col + d.dx},${tipDot.row + d.dy}`;
-        const nIdx = dotMap.get(key);
-        if (nIdx !== undefined && !dots[nIdx].occupied) {
-            const align = d.dx * mainDx + d.dy * mainDy;
-            candidates.push({ idx: nIdx, d, align });
-        }
-    }
-    candidates.sort((a, b) => b.align - a.align);
+    const usedSpawns = new Set();
 
-    const lateralCandidates = [];
-    for (let ci = 1; ci < chain.length - 1; ci++) {
-        const cd = dots[chain[ci]];
-        for (const d of DIR8) {
-            const key = `${cd.col + d.dx},${cd.row + d.dy}`;
-            const nIdx = dotMap.get(key);
-            if (nIdx === undefined || dots[nIdx].occupied) continue;
-            const align = d.dx * mainDx + d.dy * mainDy;
-            if (align <= 0) lateralCandidates.push({ idx: nIdx, d });
-        }
+    // Prevent any child from spawning on the exact dot this branch started from (its connection to the grandparent).
+    if (depth > 0 && chain.length > 1) {
+        usedSpawns.add(chain[0]);
     }
 
-    const usedSpawn = new Set();
     for (let i = 0; i < children.length; i++) {
         const child = children[i];
-        let spawnIdx = null;
+
+        let spawnIdx = null; // Must find a unique dot from the parent's chain
         let spawnDir = { dx: mainDx, dy: mainDy };
 
-        if (i === 0 && candidates.length > 0) {
-            const pick = candidates.shift();
-            if (!usedSpawn.has(pick.idx)) {
-                spawnIdx = pick.idx;
-                spawnDir = pick.d;
-                usedSpawn.add(pick.idx);
-            }
-        }
+        const tipIdx = chain[chain.length - 1];
 
-        if (spawnIdx === null && lateralCandidates.length > 0) {
-            lateralCandidates.sort((a, b) => {
-                const sa = countFreeNeighbours(dots, dotMap, a.idx);
-                const sb = countFreeNeighbours(dots, dotMap, b.idx);
-                return sb - sa;
-            });
-            while (lateralCandidates.length > 0 && spawnIdx === null) {
-                const pick = lateralCandidates.shift();
-                if (!usedSpawn.has(pick.idx)) {
-                    spawnIdx = pick.idx;
-                    spawnDir = pick.d;
-                    usedSpawn.add(pick.idx);
+        // First (largest) child always tries to extend from the tip
+        if (i === 0 && !usedSpawns.has(tipIdx)) {
+            spawnIdx = tipIdx;
+        } else {
+            // Further children/leaves find remaining unused dots on the parent chain
+            for (let j = chain.length - 1; j >= 0; j--) {
+                if (!usedSpawns.has(chain[j])) {
+                    spawnIdx = chain[j];
+                    break;
                 }
             }
         }
 
-        if (spawnIdx === null && candidates.length > 0) {
-            while (candidates.length > 0 && spawnIdx === null) {
-                const pick = candidates.shift();
-                if (!usedSpawn.has(pick.idx)) {
-                    spawnIdx = pick.idx;
-                    spawnDir = pick.d;
-                    usedSpawn.add(pick.idx);
+        // If no unique dots are left on the parent chain, skip this child!
+        // This perfectly guarantees no multiple leaves overlap on a single dot.
+        if (spawnIdx === null) continue;
+
+        usedSpawns.add(spawnIdx);
+
+        if (i > 0) {
+            let bestD = DIR8[0];
+            let bestScore = -Infinity;
+            for (const d of DIR8) {
+                const key = `${dots[spawnIdx].col + d.dx},${dots[spawnIdx].row + d.dy}`;
+                const nIdx = dotMap.get(key);
+                if (nIdx !== undefined && !dots[nIdx].occupied) {
+                    const align = d.dx * mainDx + d.dy * mainDy;
+                    // encourage going UP, penalize going down heavily
+                    const score = align + rand(0, 1) - (d.dy > 0 ? 3 : 0);
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestD = d;
+                    }
                 }
             }
+            if (bestScore > -Infinity) spawnDir = bestD;
         }
 
-        if (spawnIdx === null) {
-            const fallback = findChainAdjacentFreeDot(
-                dots,
-                dotMap,
-                chain,
-                usedSpawn,
-                mainDx,
-                mainDy
-            );
-            if (fallback) {
-                spawnIdx = fallback.idx;
-                spawnDir = fallback.d;
-                usedSpawn.add(fallback.idx);
-            }
-        }
+        const childParentW = (i === 0) ? tipW : (baseW * 0.8);
 
-        if (spawnIdx !== null && !dots[spawnIdx].occupied) {
-            buildBranchDot(
-                child,
-                spawnIdx,
-                dots,
-                dotMap,
-                depth + 1,
-                ranges,
-                allBranches,
-                dotSpacing,
-                spawnDir
-            );
-        }
+        buildBranchDot(
+            child, spawnIdx, dots, dotMap, depth + 1,
+            ranges, allBranches, dotSpacing, spawnDir, true, i === 0, childParentW
+        );
     }
 }
 

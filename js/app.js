@@ -18,6 +18,8 @@ import {
     getRanges,
     getLateralRanges,
     getDotRanges,
+    sectionLateral,
+    sectionDot,
 } from "./ui-inputs.js";
 
 import { renderHierarchy, setHierarchyMode } from "./hierarchy-ui.js";
@@ -30,7 +32,6 @@ import {
     generateDotGrid,
     findClosestFreeDot,
     tuneDotRangesForTree,
-    buildGroundStemToDot,
 } from "./builder-dot.js";
 
 const state = {
@@ -168,6 +169,14 @@ function closeSaveManager() {
 function syncUI() {
     state.currentMode = modeSelect.value;
     setHierarchyMode(state.currentMode);
+
+    if (sectionLateral) {
+        sectionLateral.style.display = state.currentMode === "lateral" ? "block" : "none";
+    }
+    if (sectionDot) {
+        sectionDot.style.display = state.currentMode === "dot" ? "block" : "none";
+    }
+
     renderHierarchy();
 }
 
@@ -263,6 +272,21 @@ function findBranchAtEvent(e) {
     const y = (e.clientY - rect.top) * (canvas.height / rect.height);
     const rx = x / dpr;
     const ry = y / dpr;
+    if (e.shiftKey) {
+        // Find leaves by radius
+        for (let i = state.allBranches.length - 1; i >= 0; i--) {
+            const b = state.allBranches[i];
+            if (b.isLeaf && b.leafData) {
+                const dx = b.leafData.x - rx;
+                const dy = b.leafData.y - ry;
+                // generous hit radius for the leaf
+                const r = b.leafData.size * 0.8;
+                if (dx * dx + dy * dy <= r * r) return b;
+            }
+        }
+        return null;
+    }
+
     for (let i = state.allBranches.length - 1; i >= 0; i--) {
         const b = state.allBranches[i];
         if (ctx.isPointInPath(b.path2d, rx, ry)) return b;
@@ -339,22 +363,17 @@ function generateTree() {
         const rows = rawRanges.gridRows;
         const gridCx = W / 2;
 
-        // ── Trunk gap: dot crown sits above a real trunk
-        const trunkH = Math.max(80, spacing * 4);   // visible trunk height
-        const crownBottomY = groundY - trunkH;         // bottom of dot grid
-        const gridCy = crownBottomY - (Math.floor(rows / 2)) * spacing;
+        // Grid sits on the ground
+        const gridCy = groundY - (Math.floor(rows / 2)) * spacing;
 
         const dots = generateDotGrid(gridCx, gridCy, spacing, cols, rows, rawRanges.shape);
         const ranges = tuneDotRangesForTree(tree, rawRanges, dots.length);
         const dotMap = new Map();
         dots.forEach((d, i) => dotMap.set(`${d.col},${d.row}`, i));
 
-        // Start dot = bottommost dot closest to centre
-        const startIdx = findClosestFreeDot(dots, gridCx, crownBottomY + spacing * 0.5);
+        // Start dot = closest dot to bottom centre
+        const startIdx = findClosestFreeDot(dots, gridCx, groundY);
         if (startIdx >= 0) {
-            // Draw trunk from ground up to first dot
-            buildGroundStemToDot(gridCx, groundY, dots[startIdx], ranges.trunkWid, state.allBranches);
-            // Build dot-grid crown
             buildBranchDot(
                 tree, startIdx, dots, dotMap, 0,
                 ranges, state.allBranches, spacing,
