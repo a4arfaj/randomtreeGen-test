@@ -26,6 +26,43 @@ export function drawBranchFill(path, depth, opacity = 1) {
     ctx.restore();
 }
 
+// Show base-collision allowance zone.
+function drawBranchBaseAllowZone(path, allowT = 0.25, opacity = 1) {
+    if (!path?.left || !path?.right) return;
+    const n = Math.min(path.left.length, path.right.length);
+    if (n < 4) return;
+    const seg = Math.max(2, Math.floor(n * allowT));
+
+    ctx.save();
+    ctx.globalAlpha = opacity;
+    ctx.beginPath();
+    ctx.moveTo(path.left[0].x, path.left[0].y);
+    for (let i = 1; i <= seg; i++) ctx.lineTo(path.left[i].x, path.left[i].y);
+    for (let i = seg; i >= 0; i--) ctx.lineTo(path.right[i].x, path.right[i].y);
+    ctx.closePath();
+    ctx.fillStyle = "rgba(66,165,245,0.35)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(100,190,255,0.95)";
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+    ctx.restore();
+}
+
+function drawCollisionPoint(x, y, opacity = 1) {
+    ctx.save();
+    ctx.globalAlpha = opacity;
+    ctx.beginPath();
+    ctx.arc(x, y, 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(220,50,47,0.92)";
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x, y, 5.6, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(255,190,190,0.95)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.restore();
+}
+
 // ── Draw tiny stem line for leaf minibranches ──
 export function drawLeafStemLine(path, tipW, opacity = 1) {
     if (!path || !path.samples || path.samples.length < 2) return;
@@ -190,13 +227,27 @@ export function drawSky(W, H, groundY) {
 // ── Debug overlay (yellow border + red growth zone) ──
 export function renderDebugOverlay(branch, stroke = "#FFFF00", showZone = true) {
     ctx.save();
-    ctx.lineWidth = 1;
+    ctx.lineWidth = 1.5;
     ctx.strokeStyle = stroke;
     ctx.filter = "drop-shadow(0 0 2px black)";
     if (branch.isLeaf && branch.leafData) {
+        // Draw the real leaf bezier outline — same transform as drawLeaf()
+        const { x, y, angle, size } = branch.leafData;
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(angle);
+        const s = size / 18;
+        ctx.scale(s, s);
+        ctx.translate(0, 9);
         ctx.beginPath();
-        ctx.arc(branch.leafData.x, branch.leafData.y, branch.leafData.size * 1.0, 0, Math.PI * 2);
+        ctx.moveTo(0, -18);
+        ctx.bezierCurveTo(3.25, -11.7, 4.55, -7.2, 3.9, -5.4);
+        ctx.bezierCurveTo(3.25, -3.15, 1.3, -1.35, 0, 0);
+        ctx.bezierCurveTo(-1.3, -3.15, -3.25, -3.15, -3.9, -5.4);
+        ctx.bezierCurveTo(-4.55, -7.2, -3.25, -11.7, 0, -18);
+        ctx.closePath();
         ctx.stroke();
+        ctx.restore();
     } else {
         ctx.beginPath();
         ctx.moveTo(branch.path.left[0].x, branch.path.left[0].y);
@@ -297,7 +348,9 @@ export function renderScene(state) {
 
     // Pass 1: non-leaf branches
     for (const b of ordered) {
-        if (!b.isLeaf) drawBranchFill(b.path, b.depth, getBranchOpacity(b.depth));
+        if (!b.isLeaf) {
+            drawBranchFill(b.path, b.depth, getBranchOpacity(b.depth));
+        }
     }
 
     // Pass 2: leaf stems
@@ -320,6 +373,43 @@ export function renderScene(state) {
                 getBranchOpacity(b.depth)
             );
     }
+
+    if (isDebug) {
+        // Base allowance (25%) where collisions are allowed.
+        const highlighted = new Set();
+        if (selectedBranch) {
+            for (const b of ordered) {
+                if (selectedNodeIds && b.nodeId && selectedNodeIds.has(b.nodeId)) {
+                    highlighted.add(b);
+                } else if (!selectedNodeIds && b === selectedBranch) {
+                    highlighted.add(b);
+                }
+            }
+        } else if (hoveredBranch) {
+            highlighted.add(hoveredBranch);
+        }
+        for (const b of highlighted) {
+            if (!b.isLeaf) {
+                drawBranchBaseAllowZone(
+                    b.path,
+                    b.baseAllowT ?? 0.25,
+                    getBranchOpacity(b.depth)
+                );
+            }
+        }
+
+        // Actual detected collisions outside allowance / leaf body overlaps.
+        for (const b of ordered) {
+            if (Array.isArray(b.collisionPoints)) {
+                for (const p of b.collisionPoints) {
+                    drawCollisionPoint(p.x, p.y, getBranchOpacity(b.depth));
+                }
+            }
+            if (b.isLeaf && b.leafCollision && b.leafData) {
+                renderDebugOverlay(b, "rgba(220,50,47,0.95)", false);
+            }
+        }
+    }
     // Debug overlay
     if (isDebug) {
         if (selectedBranch) {
@@ -341,6 +431,19 @@ export function renderScene(state) {
             renderDebugOverlay(hoveredBranch);
         }
     }
+
+    // White polygon border on the branch currently being worked on by the agent
+    for (const b of ordered) {
+        if (b.isHighlightWhite) {
+            renderDebugOverlay(b, "#FFFFFF", false);
+        }
+    }
+
+    // Agent draws its own red overlap zone + eyeball (on top of white border)
+    if (state.agent && state.agent.active) {
+        state.agent.draw(ctx);
+    }
+
     ctx.restore();
 }
 

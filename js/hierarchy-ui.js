@@ -55,7 +55,9 @@ function buildNodeEl(node, depth, isTrunk) {
     } else if (node.children.length === 0) {
         label.textContent = "Leaf";
     } else {
-        const verb = currentModeRef === "division" ? "Divides" : "Sprouts";
+        let verb = "Sprouts";
+        if (currentModeRef === "division") verb = "Divides";
+        else if (currentModeRef === "planned") verb = "Allocates";
         label.textContent = `${verb} → ${node.children.length}`;
     }
 

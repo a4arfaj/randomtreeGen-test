@@ -23,9 +23,18 @@ import {
 } from "./ui-inputs.js";
 
 import { renderHierarchy, setHierarchyMode } from "./hierarchy-ui.js";
-import { resetCollisionState, prepareSubtreeSpace } from "./collision.js";
+import {
+    resetCollisionState,
+    prepareSubtreeSpace,
+    distToSegmentSquared,
+} from "./collision.js";
 import { buildBranchDivision } from "./builder-division.js";
 import { buildBranchLateral } from "./builder-lateral.js";
+import {
+    buildBranchPlanned,
+    preparePlannedTree,
+    resetPlannedBaseMap,
+} from "./builder-planned.js";
 import { renderScene } from "./renderer.js";
 import {
     buildBranchDot,
@@ -33,6 +42,8 @@ import {
     findClosestFreeDot,
     tuneDotRangesForTree,
 } from "./builder-dot.js";
+import { Agent } from "./agent.js";
+import { buildLeafCollisionCircles } from "./leaf.js";
 
 const state = {
     currentMode: modeSelect.value,
@@ -47,6 +58,8 @@ const state = {
     rvFadeLevel,
     dotGridData: null,
     showDots: false,
+    tree: null,
+    agent: new Agent(),
 };
 
 const STORAGE_KEY = "treeBuilder.savedHierarchies.v1";
@@ -356,6 +369,23 @@ function generateTree() {
         );
         if (state.showDots) refreshDotPreview();
         else state.dotGridData = null;
+    } else if (state.currentMode === "planned") {
+        tree._targetAngle = 0;
+        resetPlannedBaseMap();
+        const profile = preparePlannedTree(tree, H, groundY);
+        buildBranchPlanned(
+            tree,
+            W / 2,
+            groundY,
+            0,
+            profile.trunkWid,
+            0,
+            profile,
+            state.allBranches
+        );
+        annotatePlannedCollisions(state.allBranches);
+        if (state.showDots) refreshDotPreview();
+        else state.dotGridData = null;
     } else if (state.currentMode === "dot") {
         const rawRanges = getDotRanges();
         const spacing = rawRanges.dotSpacing;
@@ -383,7 +413,239 @@ function generateTree() {
         state.dotGridData = { dots, dotSpacing: spacing };
     }
 
+    state.tree = tree;
+    if (state.agent.active) state.agent.stop(state); // reset agent if user regenerates
     renderScene(state);
+}
+
+function annotatePlannedCollisions(allBranches) {
+    for (const b of allBranches) {
+        b.collisionPoints = [];
+        b.leafCollision = false;
+    }
+
+    const branches = allBranches.filter((b) => !b.isLeaf && b.path?.samples?.length >= 4);
+    const leaves = allBranches.filter((b) => b.isLeaf && b.leafData);
+
+    const startIdx = (b) => {
+        const n = b.path.samples.length;
+        return Math.min(n - 2, Math.max(1, Math.floor(n * (b.baseAllowT ?? 0.25))));
+    };
+
+    // Branch-vs-branch collisions (ignore first 25% base allowance on both branches).
+    for (let i = 0; i < branches.length; i++) {
+        for (let j = i + 1; j < branches.length; j++) {
+            const a = branches[i];
+            const b = branches[j];
+            const a0 = startIdx(a);
+            const b0 = startIdx(b);
+            let found = null;
+
+            for (let ai = a0; ai < a.path.samples.length; ai += 2) {
+                const p = a.path.samples[ai];
+                for (let bj = b0; bj < b.path.samples.length - 2; bj += 2) {
+                    const q0 = b.path.samples[bj];
+                    const q1 = b.path.samples[bj + 2];
+                    const d2 = distToSegmentSquared(p, q0, q1);
+                    const qw = ((q0.w || 1) + (q1.w || 1)) * 0.5;
+                    const minDist = (p.w || 1) * 0.5 + qw * 0.5;
+                    if (d2 < minDist * minDist * 0.65) {
+                        found = { x: p.x, y: p.y };
+                        break;
+                    }
+                }
+                if (found) break;
+            }
+
+            if (found) {
+                a.collisionPoints.push(found);
+                b.collisionPoints.push(found);
+            }
+        }
+    }
+
+    // Leaf-vs-leaf body collisions (real leaf body circles).
+    const leafPolys = leaves.map((b) => ({ b, poly: buildLeafPolygonFromData(b.leafData) }));
+    for (let i = 0; i < leafPolys.length; i++) {
+        for (let j = i + 1; j < leafPolys.length; j++) {
+            const a = leafPolys[i];
+            const b = leafPolys[j];
+            if (polysIntersect(a.poly, b.poly)) {
+                const pa = a.b.leafData;
+                const pb = b.b.leafData;
+                const hit = { x: (pa.x + pb.x) * 0.5, y: (pa.y + pb.y) * 0.5 };
+                a.b.leafCollision = true;
+                b.b.leafCollision = true;
+                a.b.collisionPoints.push(hit);
+                b.b.collisionPoints.push(hit);
+            }
+        }
+    }
+
+    // Leaf-vs-branch body collisions by polygon intersection (outside base-allow zone).
+    const branchPolys = branches.map((b) => ({
+        b,
+        poly: buildBranchPolyFromPath(b.path, b.baseAllowT ?? 0.25),
+    }));
+    for (const lp of leafPolys) {
+        for (const bp of branchPolys) {
+            if (!bp.poly.length) continue;
+            if (polysIntersect(lp.poly, bp.poly)) {
+                lp.b.leafCollision = true;
+                const hit = { x: lp.b.leafData.x, y: lp.b.leafData.y };
+                lp.b.collisionPoints.push(hit);
+                bp.b.collisionPoints.push(hit);
+            }
+        }
+    }
+
+    // Legacy circle checks kept as fallback for near-touch cases.
+    for (let i = 0; i < leaves.length; i++) {
+        const a = leaves[i];
+        const ca = buildLeafCollisionCircles(a.leafData);
+        for (let j = i + 1; j < leaves.length; j++) {
+            const b = leaves[j];
+            const cb = buildLeafCollisionCircles(b.leafData);
+            let hit = null;
+            for (const c1 of ca) {
+                for (const c2 of cb) {
+                    const dx = c1.x - c2.x;
+                    const dy = c1.y - c2.y;
+                    const rr = c1.r + c2.r;
+                    if (dx * dx + dy * dy < rr * rr) {
+                        hit = { x: (c1.x + c2.x) * 0.5, y: (c1.y + c2.y) * 0.5 };
+                        break;
+                    }
+                }
+                if (hit) break;
+            }
+            if (hit) {
+                a.leafCollision = true;
+                b.leafCollision = true;
+                a.collisionPoints.push(hit);
+                b.collisionPoints.push(hit);
+            }
+        }
+    }
+
+    // Leaf-vs-branch body collisions (ignore branch base-allow zone).
+    for (const leafBranch of leaves) {
+        const circles = buildLeafCollisionCircles(leafBranch.leafData);
+        for (const br of branches) {
+            const b0 = startIdx(br);
+            let hit = null;
+            for (const c of circles) {
+                for (let bi = b0; bi < br.path.samples.length - 2; bi += 2) {
+                    const s0 = br.path.samples[bi];
+                    const s1 = br.path.samples[bi + 2];
+                    const d2 = distToSegmentSquared(c, s0, s1);
+                    const bw = ((s0.w || 1) + (s1.w || 1)) * 0.5;
+                    const minDist = c.r + bw * 0.5;
+                    if (d2 < minDist * minDist) {
+                        hit = { x: c.x, y: c.y };
+                        break;
+                    }
+                }
+                if (hit) break;
+            }
+            if (hit) {
+                leafBranch.leafCollision = true;
+                leafBranch.collisionPoints.push(hit);
+                br.collisionPoints.push(hit);
+            }
+        }
+    }
+}
+
+function bezierPoint(p0, p1, p2, p3, t) {
+    const mt = 1 - t;
+    const mt2 = mt * mt;
+    const t2 = t * t;
+    return {
+        x: mt2 * mt * p0.x + 3 * mt2 * t * p1.x + 3 * mt * t2 * p2.x + t2 * t * p3.x,
+        y: mt2 * mt * p0.y + 3 * mt2 * t * p1.y + 3 * mt * t2 * p2.y + t2 * t * p3.y,
+    };
+}
+
+function buildLeafPolygonFromData(leaf, steps = 10) {
+    if (!leaf) return [];
+    const right = [];
+    const left = [];
+    const p0 = { x: 0, y: -18 };
+    const p1 = { x: 3.25, y: -11.7 };
+    const p2 = { x: 4.55, y: -7.2 };
+    const p3 = { x: 0, y: 0 };
+    const q0 = { x: 0, y: 0 };
+    const q1 = { x: -4.55, y: -7.2 };
+    const q2 = { x: -3.25, y: -11.7 };
+    const q3 = { x: 0, y: -18 };
+    for (let i = 0; i <= steps; i++) right.push(bezierPoint(p0, p1, p2, p3, i / steps));
+    for (let i = 0; i <= steps; i++) left.push(bezierPoint(q0, q1, q2, q3, i / steps));
+    const poly = right.concat(left);
+
+    const s = (leaf.size || 18) / 18;
+    const c = Math.cos(leaf.angle || 0);
+    const sn = Math.sin(leaf.angle || 0);
+    return poly.map((p) => {
+        const lx = p.x * s;
+        const ly = (p.y + 9) * s;
+        return {
+            x: leaf.x + lx * c - ly * sn,
+            y: leaf.y + lx * sn + ly * c,
+        };
+    });
+}
+
+function buildBranchPolyFromPath(path, baseAllowT = 0.25) {
+    if (!path?.left || !path?.right) return [];
+    const n = Math.min(path.left.length, path.right.length);
+    if (n < 4) return [];
+    const s = Math.min(n - 2, Math.max(1, Math.floor(n * baseAllowT)));
+    const poly = [];
+    for (let i = s; i < n; i++) poly.push(path.left[i]);
+    for (let i = n - 1; i >= s; i--) poly.push(path.right[i]);
+    return poly;
+}
+
+function pointInPoly(pt, poly) {
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const xi = poly[i].x;
+        const yi = poly[i].y;
+        const xj = poly[j].x;
+        const yj = poly[j].y;
+        const hit = yi > pt.y !== yj > pt.y &&
+            pt.x < ((xj - xi) * (pt.y - yi)) / ((yj - yi) || 1e-9) + xi;
+        if (hit) inside = !inside;
+    }
+    return inside;
+}
+
+function segIntersect(a, b, c, d) {
+    const o = (p, q, r) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+    const o1 = o(a, b, c);
+    const o2 = o(a, b, d);
+    const o3 = o(c, d, a);
+    const o4 = o(c, d, b);
+    return (o1 === 0 && o2 === 0 && o3 === 0 && o4 === 0)
+        ? false
+        : (o1 > 0) !== (o2 > 0) && (o3 > 0) !== (o4 > 0);
+}
+
+function polysIntersect(a, b) {
+    if (!a.length || !b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+        const a0 = a[i];
+        const a1 = a[(i + 1) % a.length];
+        for (let j = 0; j < b.length; j++) {
+            const b0 = b[j];
+            const b1 = b[(j + 1) % b.length];
+            if (segIntersect(a0, a1, b0, b1)) return true;
+        }
+    }
+    if (pointInPoly(a[0], b)) return true;
+    if (pointInPoly(b[0], a)) return true;
+    return false;
 }
 
 function resizeCanvas() {
@@ -441,3 +703,21 @@ syncUI();
 state.showDots = !!chkShowDots?.checked;
 resizeCanvas();
 window.__openSaveManager = openSaveManager;
+
+// ── Agent Event & Loop ──
+const btnDeployAgent = document.getElementById("btn-deploy-agent");
+if (btnDeployAgent) {
+    btnDeployAgent.addEventListener("click", () => {
+        state.agent.start(state);
+    });
+}
+
+function agentLoop() {
+    if (state.agent && state.agent.active) {
+        if (state.agent.update(state)) {
+            renderScene(state);
+        }
+    }
+    requestAnimationFrame(agentLoop);
+}
+agentLoop();
