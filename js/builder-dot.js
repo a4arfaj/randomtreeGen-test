@@ -8,7 +8,7 @@
  */
 
 import { ctx } from "./ui-inputs.js";
-import { rand } from "./utils.js";
+import { deg2rad, lerp, rand, seededRandom } from "./utils.js";
 
 const DIR8 = [
     { dx: 1, dy: 0 },
@@ -23,10 +23,6 @@ const DIR8 = [
 
 function clamp(v, lo, hi) {
     return Math.max(lo, Math.min(hi, v));
-}
-
-function lerp(a, b, t) {
-    return a + (b - a) * t;
 }
 
 function subtreeStats(node) {
@@ -340,7 +336,7 @@ function findChainAdjacentFreeDot(dots, dotMap, chain, usedSpawn, mainDx, mainDy
 function buildLeafAtDot(dot, leafHue, dotSpacing, depth = 0, prefDir = { dx: 0, dy: -1 }, isTip = true, parentW = 0) {
     let baseAngle = Math.atan2(prefDir.dx, -prefDir.dy);
     if (!isTip) {
-        const side = Math.random() < 0.5 ? 1 : -1;
+        const side = seededRandom() < 0.5 ? 1 : -1;
         baseAngle += side * rand(Math.PI / 2 - 0.5, Math.PI / 2 + 0.5);
     } else {
         baseAngle += rand(-0.2, 0.2);
@@ -433,7 +429,7 @@ export function buildBranchDot(
             : Math.max(2.2, ranges.trunkWid * Math.pow(ranges.widthRatio || 0.74, depth));
     const tipW = Math.max(0.9, baseW * (ranges.widthRatio || 0.52));
     const curviness = 0;
-    const curveDir = Math.random() < 0.5 ? 1 : -1;
+    const curveDir = seededRandom() < 0.5 ? 1 : -1;
     const path = chainToPath(chain, dots, dotSpacing, baseW, tipW, curviness, curveDir);
 
     allBranches.push({

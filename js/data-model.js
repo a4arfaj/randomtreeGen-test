@@ -3,7 +3,7 @@
  * Tree node structure and tree traversal utilities.
  */
 
-import { uid } from "./utils.js";
+import { ensureIdCounterAtLeast, uid } from "./utils.js";
 
 // ── Node factory ──
 export function createNode() {
@@ -43,6 +43,31 @@ function cloneNodeSnapshot(node) {
     };
 }
 
+function maxNumericNodeId(node) {
+    if (!node) return 0;
+    let maxId = 0;
+    const walk = (n) => {
+        if (!n) return;
+        const m = /^n(\d+)$/.exec(String(n.id || ""));
+        if (m) maxId = Math.max(maxId, Number(m[1]));
+        for (const c of (n.children || [])) walk(c);
+    };
+    walk(node);
+    return maxId;
+}
+
+function cloneNodeSnapshotWithUniqueIds(node, seen = new Set()) {
+    const rawId = node?.id;
+    const preferredId = typeof rawId === "string" && rawId ? rawId : uid();
+    const id = !seen.has(preferredId) ? preferredId : uid();
+    seen.add(id);
+    return {
+        id,
+        expanded: node?.expanded !== false,
+        children: (node?.children || []).map((c) => cloneNodeSnapshotWithUniqueIds(c, seen)),
+    };
+}
+
 /**
  * Plain-JSON snapshot for persistence.
  */
@@ -54,7 +79,10 @@ export function snapshotTree(root = tree) {
  * Load a snapshot into the live `tree` object while keeping the module binding stable.
  */
 export function loadTreeSnapshot(snapshot) {
-    const next = cloneNodeSnapshot(snapshot || createNode());
+    // Keep uid() above existing ids, then normalize duplicates from older saved data.
+    ensureIdCounterAtLeast(maxNumericNodeId(snapshot));
+    const next = cloneNodeSnapshotWithUniqueIds(snapshot || createNode());
+    ensureIdCounterAtLeast(maxNumericNodeId(next));
     tree.id = next.id;
     tree.expanded = next.expanded;
     tree.children = next.children;

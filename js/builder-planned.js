@@ -103,12 +103,19 @@ function footprintPx(node) {
     const need = node._planNeed || 30;
     const d = node._planDepth || 1;
     if (node.children.length === 0) {
-        return clamp(44 + Math.sqrt(need) * 2.8, 44, 90);
+        return clamp(34 + Math.sqrt(need) * 2.0, 34, 72);
     }
-    return clamp(34 + Math.sqrt(need) * 3.8 + d * 5.2, 40, 150);
+    return clamp(30 + Math.sqrt(need) * 3.0 + d * 4.2, 34, 120);
 }
 
-function requiredLengthForNode(node, profile) {
+function coneWeight(node) {
+    const need = node?._planNeed || 20;
+    const d = node?._planDepth || 1;
+    const leaves = node?._planLeaves || (node?.children?.length === 0 ? 1 : 0);
+    return Math.max(1, Math.sqrt(need) * 0.9 + d * 0.7 + Math.sqrt(leaves) * 0.7);
+}
+
+function requiredLengthForNode(node, profile, depth = 0) {
     if (!node || node.children.length === 0) return 0;
     const ordered = [...node.children].sort(
         (a, b) => (b._planNeed || 0) - (a._planNeed || 0)
@@ -119,8 +126,11 @@ function requiredLengthForNode(node, profile) {
     const gapPx = 20;
     const totalFoot = sideChildren.reduce((acc, c) => acc + footprintPx(c), 0);
     const totalGap = Math.max(0, sideChildren.length - 1) * gapPx;
-    const requiredUsable = (totalFoot + totalGap) * 1.25; // deterministic safety margin
-    return requiredUsable / Math.max(0.2, 1 - profile.latMinHeight);
+    const requiredUsable = (totalFoot + totalGap) * 1.06;
+    const raw = requiredUsable / Math.max(0.22, 1 - profile.latMinHeight);
+    const levelUnit = profile.levelUnit || 70;
+    const maxByDepth = depth === 0 ? levelUnit * 1.55 : levelUnit * 1.25;
+    return clamp(raw, 0, maxByDepth);
 }
 
 function pathStartAngle(path) {
@@ -192,7 +202,7 @@ export function buildBranchPlanned(
         // Critical fix: branches received via prePath still need deterministic
         // re-sizing for THEIR OWN side-child footprint budget.
         if (!isLeaf) {
-            const reqLen = requiredLengthForNode(node, profile);
+            const reqLen = requiredLengthForNode(node, profile, depth);
             const curLen = pathLength(path.samples);
             if (reqLen > curLen + 1) {
                 const s0 = path.samples[0];
@@ -237,7 +247,7 @@ export function buildBranchPlanned(
             length = clamp(levelUnit * depthMul * remMul * needMul, 22, maxLen);
 
             // Deterministic "paper area" reservation.
-            length = Math.max(length, requiredLengthForNode(node, profile));
+            length = Math.max(length, requiredLengthForNode(node, profile, depth));
 
             tipWidth = Math.max(1.1, width * 0.56);
         }
@@ -319,6 +329,9 @@ export function buildBranchPlanned(
                 const span = total * scale;
                 const sideShift = (hash01(node.id + ":shift:" + (side < 0 ? "L" : "R")) - 0.5) * usableLen * 0.22;
                 let accPx = clamp((usableLen - span) * 0.5 + sideShift, 0, Math.max(0, usableLen - span));
+                const weights = list.map((it) => coneWeight(it.child));
+                const sumW = weights.reduce((a, b) => a + b, 0) || 1;
+                let wAcc = 0;
 
                 for (let li = 0; li < list.length; li++) {
                     const it = list[li];
@@ -336,6 +349,8 @@ export function buildBranchPlanned(
                     const childLeaf = child.children.length === 0;
                     const need = child._planNeed || (childLeaf ? 26 : 44);
                     const d = child._planDepth || 1;
+                    const wf = (wAcc + weights[li] * 0.5) / sumW;
+                    wAcc += weights[li];
 
                     // More outward near trunk to reduce crossing in dense base areas.
                     const trunkProxBoost = (1 - t) * 18;
@@ -378,14 +393,13 @@ export function buildBranchPlanned(
                         ? Math.max(0.5, baseW * 0.35)
                         : Math.max(0.9, baseW * 0.42);
 
-                    // Deterministic endpoint target field:
-                    // reduces local self-crossing vs simple spread-only angles.
-                    const outward = 0.78 + (1 - t) * 0.24;
-                    const upward = 0.34 + t * 0.48;
-                    const radial = finalLen * (childLeaf ? 0.95 : 0.9);
-                    const tx = sx + side * radial * outward;
-                    const ty = sy - radial * upward;
-                    const endAngle = Math.atan2(tx - sx, -(ty - sy));
+                    // Subtree-aware angular slotting (calculated, not trial):
+                    // each child receives an angle slot proportional to subtree weight.
+                    const baseDeg = clamp(30 + (1 - t) * 26 + (childLeaf ? 6 : 0), 28, 62);
+                    const fanHalfDeg = clamp(16 + (1 - t) * 30 + Math.sqrt(sumW) * 2.2, 18, 64);
+                    const centerFrac = (wf - 0.5) * 2;
+                    const slotDeg = centerFrac * fanHalfDeg;
+                    const endAngle = s.angle + side * deg2rad(baseDeg + slotDeg);
 
                     const baseR = Math.max(4.5, baseW * 0.62);
                     const baseCollides = hasBaseCollision(sx, sy, baseR);

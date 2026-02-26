@@ -444,6 +444,120 @@ export function renderScene(state) {
         state.agent.draw(ctx);
     }
 
+    // ── Show ALL collisions overlay (checkbox-driven) ──────────────────
+    if (state.showAllCollisions) {
+        const abs = state.allBranches;
+        const parentMap = state.agent?._parentMap || new Map();
+        const areAdj = (a, b) => {
+            const n1 = a.nodeId, n2 = b.nodeId;
+            if (n1 === n2) return true;
+            if (parentMap.get(n1) === n2) return true;
+            if (parentMap.get(n2) === n1) return true;
+            return false;
+        };
+
+        // Phase 1: DETECT in identity transform (isPointInPath needs un-scaled context)
+        const savedXform = ctx.getTransform();
+        ctx.resetTransform();
+
+        const stemHits = [];   // { branch, minI, maxI }
+        const leafHits = [];   // { leafData }
+
+        for (let i = 0; i < abs.length; i++) {
+            const b1 = abs[i];
+            if (!b1.path?.samples || !b1.path2d) continue;
+            for (let j = i + 1; j < abs.length; j++) {
+                const b2 = abs[j];
+                if (!b2.path?.samples || !b2.path2d) continue;
+                if (areAdj(b1, b2)) continue;
+
+                // b1 samples in b2
+                let minI = Infinity, maxI = -1;
+                const s = b1.path.samples;
+                for (let k = 4; k < s.length; k += 3) {
+                    if (!s[k]) continue;
+                    if (ctx.isPointInPath(b2.path2d, s[k].x, s[k].y)) {
+                        if (k < minI) minI = k;
+                        if (k > maxI) maxI = k;
+                    }
+                }
+                if (maxI >= minI && minI < Infinity) {
+                    stemHits.push({ branch: b1, minI, maxI });
+                }
+
+                // b2 samples in b1
+                minI = Infinity; maxI = -1;
+                const s2 = b2.path.samples;
+                for (let k = 4; k < s2.length; k += 3) {
+                    if (!s2[k]) continue;
+                    if (ctx.isPointInPath(b1.path2d, s2[k].x, s2[k].y)) {
+                        if (k < minI) minI = k;
+                        if (k > maxI) maxI = k;
+                    }
+                }
+                if (maxI >= minI && minI < Infinity) {
+                    stemHits.push({ branch: b2, minI, maxI });
+                }
+
+                // Leaf body hits
+                if (b1.isLeaf && b1.leafData && b2.path2d) {
+                    if (ctx.isPointInPath(b2.path2d, b1.leafData.x, b1.leafData.y)) {
+                        leafHits.push({ leafData: b1.leafData });
+                    }
+                }
+                if (b2.isLeaf && b2.leafData && b1.path2d) {
+                    if (ctx.isPointInPath(b1.path2d, b2.leafData.x, b2.leafData.y)) {
+                        leafHits.push({ leafData: b2.leafData });
+                    }
+                }
+            }
+        }
+
+        // Phase 2: DRAW results in the correct render transform
+        ctx.setTransform(savedXform);
+
+        for (const { branch, minI, maxI } of stemHits) {
+            const L = branch.path.left, R = branch.path.right;
+            const mi = Math.max(4, minI);
+            const ma = Math.min(maxI, Math.min(L.length, R.length) - 1);
+            if (ma < mi) continue;
+            ctx.save();
+            ctx.beginPath();
+            ctx.moveTo(L[mi].x, L[mi].y);
+            for (let ii = mi + 1; ii <= ma; ii++) ctx.lineTo(L[ii].x, L[ii].y);
+            for (let ii = ma; ii >= mi; ii--)    ctx.lineTo(R[ii].x, R[ii].y);
+            ctx.closePath();
+            ctx.fillStyle = "rgba(255, 60, 20, 0.35)";
+            ctx.fill();
+            ctx.strokeStyle = "rgba(255, 120, 40, 0.7)";
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        for (const { leafData } of leafHits) {
+            ctx.save();
+            ctx.translate(leafData.x, leafData.y);
+            ctx.rotate(leafData.angle);
+            const sz = leafData.size / 18;
+            ctx.scale(sz, sz);
+            ctx.translate(0, 9);
+            ctx.beginPath();
+            ctx.moveTo(0, -18);
+            ctx.bezierCurveTo(3.25, -11.7, 4.55, -7.2, 3.9, -5.4);
+            ctx.bezierCurveTo(3.25, -3.15, 1.3, -1.35, 0, 0);
+            ctx.bezierCurveTo(-1.3, -1.35, -3.25, -3.15, -3.9, -5.4);
+            ctx.bezierCurveTo(-4.55, -7.2, -3.25, -11.7, 0, -18);
+            ctx.closePath();
+            ctx.fillStyle = "rgba(255, 50, 10, 0.40)";
+            ctx.fill();
+            ctx.strokeStyle = "rgba(255, 120, 40, 0.8)";
+            ctx.lineWidth = 1.5 / sz;
+            ctx.stroke();
+            ctx.restore();
+        }
+    }
+
     ctx.restore();
 }
 
@@ -464,4 +578,3 @@ function syncFadeSliderRangeToTreeDepth(
     }
     rvFadeLevel.textContent = String(state.fadeFromLevel);
 }
-

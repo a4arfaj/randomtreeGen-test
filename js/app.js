@@ -3,7 +3,7 @@
  * Main entry point: events, generation, state, rendering.
  */
 
-import { rand, dpr, updateDpr } from "./utils.js";
+import { rand, dpr, updateDpr, setSeed } from "./utils.js";
 import { tree, snapshotTree, loadTreeSnapshot } from "./data-model.js";
 import {
     canvas,
@@ -42,7 +42,7 @@ import {
     findClosestFreeDot,
     tuneDotRangesForTree,
 } from "./builder-dot.js";
-import { Agent } from "./agent.js";
+import { Agent, snapshotBranches, restoreBranches } from "./agent.js";
 import { buildLeafCollisionCircles } from "./leaf.js";
 
 const state = {
@@ -58,6 +58,7 @@ const state = {
     rvFadeLevel,
     dotGridData: null,
     showDots: false,
+    showAllCollisions: false,
     tree: null,
     agent: new Agent(),
 };
@@ -232,6 +233,7 @@ if (rFadeLevel && rvFadeLevel) {
 }
 
 const chkShowDots = document.getElementById("chk-show-dots");
+const chkShowAllCollisions = document.getElementById("chk-show-all-collisions");
 
 function refreshDotPreview() {
     updateDpr();
@@ -260,6 +262,12 @@ if (chkShowDots) {
     };
     chkShowDots.addEventListener("change", onToggleDots);
     chkShowDots.addEventListener("input", onToggleDots);
+}
+if (chkShowAllCollisions) {
+    chkShowAllCollisions.addEventListener("change", () => {
+        state.showAllCollisions = chkShowAllCollisions.checked;
+        renderScene(state);
+    });
 }
 
 canvas.addEventListener("mousemove", (e) => {
@@ -324,7 +332,11 @@ function collectNodePath(node, targetId, out) {
     return false;
 }
 
-function generateTree() {
+let currentEpochSeed = Date.now();
+
+function generateTree(isRetry = false) {
+    if (isRetry !== true) currentEpochSeed = Date.now();
+    setSeed(currentEpochSeed);
     updateDpr();
     resetCollisionState();
     state.allBranches = [];
@@ -414,6 +426,7 @@ function generateTree() {
     }
 
     state.tree = tree;
+    state.agent._buildParentMap(tree); // ensure parentMap is available for collision overlay
     if (state.agent.active) state.agent.stop(state); // reset agent if user regenerates
     renderScene(state);
 }
@@ -660,7 +673,7 @@ function resizeCanvas() {
 }
 
 window.addEventListener("resize", resizeCanvas);
-btnGenerate.addEventListener("click", generateTree);
+btnGenerate.addEventListener("click", () => generateTree(false));
 btnDownload.addEventListener("click", () => {
     const link = document.createElement("a");
     link.download = "tree.png";
@@ -706,16 +719,116 @@ window.__openSaveManager = openSaveManager;
 
 // ── Agent Event & Loop ──
 const btnDeployAgent = document.getElementById("btn-deploy-agent");
+const btnRetryAgent = document.getElementById("btn-retry-agent");
+const agentDebugRuleEl = document.getElementById("agent-debug-rule");
+const ruleStepCounter = document.getElementById("rule-step-counter");
+const btnRulePrev = document.getElementById("btn-rule-prev");
+const btnRuleNext = document.getElementById("btn-rule-next");
+
+// Rule history: array of { rule, snapshot, targetNodeId }
+const ruleHistory = [];
+let ruleHistoryCursor = -1; // -1 = live (follows latest)
+let isNavigating = false;   // true while user is scrubbing history
+
+function pushRule(text, targetNodeId) {
+    if (!text) return;
+    // Don't push a duplicate of the last entry
+    if (ruleHistory.length > 0 && ruleHistory[ruleHistory.length - 1].rule === text) return;
+    // Snapshot only when we actually record a new rule.
+    const snap = snapshotBranches(state.allBranches);
+    // Only follow the tail if we were already there
+    const wasAtTail = ruleHistoryCursor === -1 || ruleHistoryCursor === ruleHistory.length - 1;
+    ruleHistory.push({ rule: text, snapshot: snap, targetNodeId });
+    if (wasAtTail) {
+        ruleHistoryCursor = ruleHistory.length - 1;
+        isNavigating = false;
+    }
+    updateRuleDisplay();
+}
+
+function updateRuleDisplay() {
+    if (!agentDebugRuleEl) return;
+    const total = ruleHistory.length;
+    if (total === 0) {
+        agentDebugRuleEl.textContent = "No agent active";
+        if (ruleStepCounter) ruleStepCounter.textContent = "\u2014 / \u2014";
+        if (btnRulePrev) btnRulePrev.disabled = true;
+        if (btnRuleNext) btnRuleNext.disabled = true;
+        return;
+    }
+    const idx = ruleHistoryCursor < 0 ? total - 1 : Math.min(ruleHistoryCursor, total - 1);
+    const entry = ruleHistory[idx];
+    agentDebugRuleEl.textContent = entry.rule;
+    if (ruleStepCounter) ruleStepCounter.textContent = `${idx + 1} / ${total}`;
+    if (btnRulePrev) btnRulePrev.disabled = idx <= 0;
+    if (btnRuleNext) btnRuleNext.disabled = idx >= total - 1;
+
+    // Restore tree geometry to this step's snapshot (only while scrubbing)
+    if (isNavigating && entry.snapshot && state.allBranches.length) {
+        restoreBranches(state.allBranches, entry.snapshot);
+        // Clear all white highlights then highlight the target branch
+        for (const b of state.allBranches) b.isHighlightWhite = false;
+        if (entry.targetNodeId) {
+            const target = state.allBranches.find(b => b.nodeId === entry.targetNodeId);
+            if (target) target.isHighlightWhite = true;
+        }
+        renderScene(state);
+    }
+}
+
+if (btnRulePrev) {
+    btnRulePrev.addEventListener("click", () => {
+        const idx = ruleHistoryCursor < 0 ? ruleHistory.length - 1 : ruleHistoryCursor;
+        ruleHistoryCursor = Math.max(0, idx - 1);
+        isNavigating = true;
+        updateRuleDisplay();
+    });
+}
+if (btnRuleNext) {
+    btnRuleNext.addEventListener("click", () => {
+        const idx = ruleHistoryCursor < 0 ? ruleHistory.length - 1 : ruleHistoryCursor;
+        ruleHistoryCursor = Math.min(ruleHistory.length - 1, idx + 1);
+        // If we returned to the live tail, exit navigation mode
+        isNavigating = ruleHistoryCursor < ruleHistory.length - 1;
+        updateRuleDisplay();
+    });
+}
+
 if (btnDeployAgent) {
     btnDeployAgent.addEventListener("click", () => {
+        ruleHistory.length = 0;
+        ruleHistoryCursor = -1;
+        isNavigating = false;
+        for (const b of state.allBranches) b.isHighlightWhite = false;
+        updateRuleDisplay();
         state.agent.start(state);
+    });
+}
+if (btnRetryAgent) {
+    btnRetryAgent.addEventListener("click", () => {
+        generateTree(true);
+        ruleHistory.length = 0;
+        ruleHistoryCursor = -1;
+        isNavigating = false;
+        updateRuleDisplay();
+        if (agentDebugRuleEl) agentDebugRuleEl.textContent = "Tree regenerated (Ready)";
     });
 }
 
 function agentLoop() {
-    if (state.agent && state.agent.active) {
-        if (state.agent.update(state)) {
+    if (state.agent && state.agent.active && !isNavigating) {
+        try {
+            if (state.agent.update(state)) {
+                renderScene(state);
+                const targetId = state.agent.target?.b1?.nodeId ?? null;
+                pushRule(state.agent.currentRule, targetId);
+            }
+        } catch (err) {
+            state.agent.stop(state);
+            state.agent.currentRule = `Agent stopped due to error: ${err?.message || "unknown error"}`;
+            updateRuleDisplay();
             renderScene(state);
+            console.error("Agent update failed:", err);
         }
     }
     requestAnimationFrame(agentLoop);

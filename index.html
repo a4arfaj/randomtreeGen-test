@@ -196,8 +196,38 @@
                     <div class="panel-divider" style="margin:10px 0"></div>
                     <div class="range-pair">
                         <label>Agent</label>
-                        <button id="btn-deploy-agent" class="btn btn-primary" style="flex: 2;">Deploy Fixer
-                            Agent</button>
+                        <div style="display:flex; gap: 4px; flex: 2">
+                            <button id="btn-deploy-agent" class="btn btn-primary"
+                                style="flex: 1; padding: 0.5rem 0.2rem">Deploy Fixer</button>
+                            <button id="btn-retry-agent" class="btn btn-secondary"
+                                style="flex: 1; padding: 0.5rem 0.2rem">Retry (Reset)</button>
+                        </div>
+                    </div>
+                    <div class="range-pair" style="flex-direction:column; align-items:stretch; gap:4px;">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <label style="margin:0;">Rule Info</label>
+                            <span id="rule-step-counter" style="font-size:0.7rem; color:rgba(255,255,255,0.5);">— /
+                                —</span>
+                        </div>
+                        <div id="agent-debug-rule"
+                            style="font-size: 0.75rem; color: #ffcc00; padding: 6px; background: rgba(0,0,0,0.3); border-radius: 4px; line-height: 1.4; min-height: 2.8em;">
+                            No agent active</div>
+                        <div style="display:flex; gap:4px; justify-content:flex-end;">
+                            <button id="btn-rule-prev" class="btn btn-secondary"
+                                style="flex:1; padding:3px 6px; font-size:0.8rem;" disabled>&#9664; Prev</button>
+                            <button id="btn-rule-next" class="btn btn-secondary"
+                                style="flex:1; padding:3px 6px; font-size:0.8rem;" disabled>Next &#9654;</button>
+                        </div>
+                    </div>
+                    <div class="range-pair">
+                        <label>Show Collisions</label>
+                        <div class="dual-slider single" style="justify-content:flex-start;">
+                            <input type="checkbox" id="chk-show-all-collisions"
+                                style="width:20px;height:20px;accent-color:#ff5555;" />
+                            <span style="margin-left:8px;font-size:.9em;color:rgba(255,255,255,0.7);">Highlight all
+                                overlaps</span>
+                        </div>
+                        <span class="dual-val"></span>
                     </div>
                     <div class="range-pair">
                         <label>Fade From Level</label>

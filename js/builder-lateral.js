@@ -4,7 +4,7 @@
  * Side branches sprout along the parent's length.
  */
 
-import { deg2rad, lerp, rand } from "./utils.js";
+import { deg2rad, lerp, rand, seededRandom } from "./utils.js";
 import { samplePathAt } from "./path.js";
 import {
     solveBranchPath,
@@ -146,7 +146,7 @@ export function buildBranchLateral(
             lateralMinT = Math.max(0.15, lateralMaxT - needed / length);
 
         let plans = [];
-        let lastSide = Math.random() < 0.5 ? 1 : -1;
+        let lastSide = seededRandom() < 0.5 ? 1 : -1;
 
         for (let i = 0; i < num; i++) {
             const t =
