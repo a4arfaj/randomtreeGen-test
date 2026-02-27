@@ -27,7 +27,7 @@ export function drawBranchFill(path, depth, opacity = 1) {
 }
 
 // Show base-collision allowance zone.
-function drawBranchBaseAllowZone(path, allowT = 0.25, opacity = 1) {
+function drawBranchBaseAllowZone(path, allowT = 0.5, opacity = 1) {
     if (!path?.left || !path?.right) return;
     const n = Math.min(path.left.length, path.right.length);
     if (n < 4) return;
@@ -392,7 +392,7 @@ export function renderScene(state) {
             if (!b.isLeaf) {
                 drawBranchBaseAllowZone(
                     b.path,
-                    b.baseAllowT ?? 0.25,
+                    b.baseAllowT ?? 0.5,
                     getBranchOpacity(b.depth)
                 );
             }
@@ -432,7 +432,14 @@ export function renderScene(state) {
         }
     }
 
-    // White polygon border on the branch currently being worked on by the agent
+    // Secondary branch marker (green) and primary branch marker (white)
+    for (const b of ordered) {
+        if (b.isHighlightGreen) {
+            renderDebugOverlay(b, "#66BB6A", false);
+        }
+    }
+
+    // White polygon border on the primary branch being solved
     for (const b of ordered) {
         if (b.isHighlightWhite) {
             renderDebugOverlay(b, "#FFFFFF", false);
@@ -450,10 +457,49 @@ export function renderScene(state) {
         const parentMap = state.agent?._parentMap || new Map();
         const areAdj = (a, b) => {
             const n1 = a.nodeId, n2 = b.nodeId;
-            if (n1 === n2) return true;
-            if (parentMap.get(n1) === n2) return true;
-            if (parentMap.get(n2) === n1) return true;
-            return false;
+            return n1 === n2;
+        };
+        const isParentChild = (a, b) =>
+            parentMap.get(a.nodeId) === b.nodeId || parentMap.get(b.nodeId) === a.nodeId;
+        const isSibling = (a, b) => {
+            const p1 = parentMap.get(a.nodeId);
+            const p2 = parentMap.get(b.nodeId);
+            return p1 != null && p1 === p2 && a.nodeId !== b.nodeId;
+        };
+        const baseAllowT = (b) => Math.max(0, Math.min(0.95, b?.baseAllowT ?? 0.5));
+        const baseSampleLimit = (b) => {
+            const n = b?.path?.samples?.length || 0;
+            return n <= 0 ? 0 : Math.max(4, Math.floor(n * baseAllowT(b)));
+        };
+        const nearBasePoint = (b, pt) => {
+            const p0 = b?.path?.samples?.[0];
+            if (!p0 || !pt) return false;
+            const bw = p0.w || 2;
+            const r = Math.max(6, bw * 2.2);
+            const dx = p0.x - pt.x;
+            const dy = p0.y - pt.y;
+            return dx * dx + dy * dy <= r * r;
+        };
+        const isNaturalBaseOnlyTouch = (source, target, pt, sourceSampleIdx = -1) => {
+            if (!source || !target || !pt) return false;
+            const sourceNearBase = sourceSampleIdx >= 0
+                ? sourceSampleIdx <= baseSampleLimit(source)
+                : nearBasePoint(source, pt);
+            if (isParentChild(source, target)) {
+                const child = parentMap.get(source.nodeId) === target.nodeId ? source : target;
+                if (!child?.path?.samples?.[0]) return false;
+                if (source === child) return sourceNearBase;
+                return true;
+            }
+            const targetNearBase = nearBasePoint(target, pt);
+            if (!sourceNearBase || !targetNearBase) return false;
+            return true;
+        };
+        const pointHits = (source, target, pt, sourceSampleIdx = -1) => {
+            if (!target?.path2d || !pt) return false;
+            if (areAdj(source, target)) return false;
+            if (isNaturalBaseOnlyTouch(source, target, pt, sourceSampleIdx)) return false;
+            return ctx.isPointInPath(target.path2d, pt.x, pt.y);
         };
 
         // Phase 1: DETECT in identity transform (isPointInPath needs un-scaled context)
@@ -476,7 +522,7 @@ export function renderScene(state) {
                 const s = b1.path.samples;
                 for (let k = 4; k < s.length; k += 3) {
                     if (!s[k]) continue;
-                    if (ctx.isPointInPath(b2.path2d, s[k].x, s[k].y)) {
+                    if (pointHits(b1, b2, s[k], k)) {
                         if (k < minI) minI = k;
                         if (k > maxI) maxI = k;
                     }
@@ -490,7 +536,7 @@ export function renderScene(state) {
                 const s2 = b2.path.samples;
                 for (let k = 4; k < s2.length; k += 3) {
                     if (!s2[k]) continue;
-                    if (ctx.isPointInPath(b1.path2d, s2[k].x, s2[k].y)) {
+                    if (pointHits(b2, b1, s2[k], k)) {
                         if (k < minI) minI = k;
                         if (k > maxI) maxI = k;
                     }
@@ -501,12 +547,12 @@ export function renderScene(state) {
 
                 // Leaf body hits
                 if (b1.isLeaf && b1.leafData && b2.path2d) {
-                    if (ctx.isPointInPath(b2.path2d, b1.leafData.x, b1.leafData.y)) {
+                    if (pointHits(b1, b2, { x: b1.leafData.x, y: b1.leafData.y }, -1)) {
                         leafHits.push({ leafData: b1.leafData });
                     }
                 }
                 if (b2.isLeaf && b2.leafData && b1.path2d) {
-                    if (ctx.isPointInPath(b1.path2d, b2.leafData.x, b2.leafData.y)) {
+                    if (pointHits(b2, b1, { x: b2.leafData.x, y: b2.leafData.y }, -1)) {
                         leafHits.push({ leafData: b2.leafData });
                     }
                 }

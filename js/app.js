@@ -70,6 +70,34 @@ const saveNameInput = document.getElementById("save-name-input");
 const saveCurrentBtn = document.getElementById("btn-save-current");
 const savedListEl = document.getElementById("saved-list");
 const closeSaveModalBtn = document.getElementById("btn-close-save-manager");
+const btnPreviewRules = document.getElementById("btn-preview-rules");
+const rulePreviewPanel = document.getElementById("rule-preview-panel");
+const btnCloseRulePreview = document.getElementById("btn-close-rule-preview");
+const rulePreviewActions = document.getElementById("rule-preview-actions");
+
+const rulePreviewConfigs = [
+    { id: "rotating", label: "Rotating", mode: "planned" },
+    { id: "sliding", label: "Sliding", mode: "planned" },
+    { id: "escalating", label: "Escalating", mode: "planned" },
+    { id: "neighboring", label: "Neighboring", mode: "planned" },
+    { id: "inter-neighboring", label: "Inter-Neighboring", mode: "planned" },
+    { id: "cascading", label: "Cascading", mode: "planned" },
+    { id: "condensing", label: "Condensing", mode: "planned" },
+    { id: "elongating", label: "Elongating", mode: "planned" },
+    { id: "rebuild", label: "Rebuild", mode: "planned" },
+];
+
+const rulePreviewSeeds = {
+    rotating: 10101,
+    sliding: 20202,
+    escalating: 30303,
+    neighboring: 40404,
+    "inter-neighboring": 50505,
+    cascading: 60606,
+    condensing: 70707,
+    elongating: 82828,
+    rebuild: 90909,
+};
 
 function readSavedHierarchies() {
     try {
@@ -332,6 +360,100 @@ function collectNodePath(node, targetId, out) {
     return false;
 }
 
+function previewNode(children = []) {
+    return { expanded: true, children };
+}
+
+function makeRulePreviewTree(ruleId) {
+    const L = () => previewNode();
+    switch (ruleId) {
+        case "sliding":
+            return previewNode([
+                previewNode([L(), L(), L()]),
+                previewNode([L(), previewNode([L(), L()]), L()]),
+                previewNode([L()]),
+            ]);
+        case "escalating":
+            return previewNode([
+                previewNode([
+                    previewNode([previewNode([L(), L()]), L()]),
+                    previewNode([L(), L()]),
+                    L(),
+                ]),
+                previewNode([L(), L()]),
+                previewNode([previewNode([L()])]),
+            ]);
+        case "neighboring":
+            return previewNode([
+                previewNode([previewNode([L(), L()]), previewNode([L(), L()])]),
+                previewNode([previewNode([L()]), L(), L()]),
+                previewNode([L(), L()]),
+            ]);
+        case "inter-neighboring":
+            return previewNode([
+                previewNode([previewNode([L(), L()]), L()]),
+                previewNode([previewNode([L(), L(), L()]), previewNode([L()])]),
+                previewNode([previewNode([L(), L()]), L()]),
+            ]);
+        case "cascading":
+            return previewNode([
+                previewNode([
+                    previewNode([previewNode([L(), L()]), L()]),
+                    previewNode([L(), L()]),
+                    L(),
+                ]),
+                previewNode([
+                    previewNode([L(), L()]),
+                    previewNode([L(), L(), L()]),
+                ]),
+                previewNode([previewNode([L(), L()]), L()]),
+            ]);
+        case "condensing":
+            return previewNode([
+                previewNode([previewNode([L(), L()]), previewNode([L()])]),
+                previewNode([L(), previewNode([L(), L()])]),
+                previewNode([L()]),
+            ]);
+        case "elongating":
+            return previewNode([
+                previewNode([
+                    previewNode([
+                        previewNode([
+                            previewNode([
+                                previewNode([L(), L(), L()]),
+                                previewNode([L(), L(), L()]),
+                            ]),
+                            previewNode([L(), L()]),
+                        ]),
+                        previewNode([L()]),
+                    ]),
+                    previewNode([previewNode([L(), L(), L()])]),
+                ]),
+                previewNode([
+                    previewNode([L(), L(), L()]),
+                    previewNode([L()]),
+                ]),
+                previewNode([previewNode([L(), L()]), previewNode([L()])]),
+            ]);
+        case "rebuild":
+            return previewNode([
+                previewNode([
+                    previewNode([previewNode([L(), L()]), previewNode([L(), L()])]),
+                    previewNode([L(), L(), L()]),
+                ]),
+                previewNode([previewNode([L(), L(), L()]), L()]),
+                previewNode([previewNode([L(), L()]), previewNode([L()])]),
+            ]);
+        case "rotating":
+        default:
+            return previewNode([
+                previewNode([previewNode([L(), L()]), L()]),
+                previewNode([previewNode([L(), L()]), previewNode([L()])]),
+                previewNode([L(), L()]),
+            ]);
+    }
+}
+
 let currentEpochSeed = Date.now();
 
 function generateTree(isRetry = false) {
@@ -439,13 +561,49 @@ function annotatePlannedCollisions(allBranches) {
 
     const branches = allBranches.filter((b) => !b.isLeaf && b.path?.samples?.length >= 4);
     const leaves = allBranches.filter((b) => b.isLeaf && b.leafData);
+    const parentMap = new Map();
+    const walkParents = (n, pid) => {
+        if (!n) return;
+        if (pid != null) parentMap.set(n.id, pid);
+        for (const c of (n.children || [])) walkParents(c, n.id);
+    };
+    walkParents(tree, null);
+    const isParentChild = (a, b) =>
+        parentMap.get(a.nodeId) === b.nodeId || parentMap.get(b.nodeId) === a.nodeId;
+    const isSibling = (a, b) => {
+        const p1 = parentMap.get(a.nodeId);
+        const p2 = parentMap.get(b.nodeId);
+        return p1 != null && p1 === p2 && a.nodeId !== b.nodeId;
+    };
+    const nearBasePoint = (br, pt) => {
+        const p0 = br?.path?.samples?.[0];
+        if (!p0 || !pt) return false;
+        const bw = p0.w || 2;
+        const r = Math.max(6, bw * 2.2);
+        const dx = p0.x - pt.x;
+        const dy = p0.y - pt.y;
+        return dx * dx + dy * dy <= r * r;
+    };
+    const baseAllowT = (br) => Math.max(0, Math.min(0.95, br?.baseAllowT ?? 0.5));
+    const naturalBaseOnly = (a, b, pt, ai = -1) => {
+        const aNear = ai >= 0 ? ai <= Math.max(4, Math.floor((a.path?.samples?.length || 0) * baseAllowT(a))) : nearBasePoint(a, pt);
+        if (isParentChild(a, b)) {
+            const child = parentMap.get(a.nodeId) === b.nodeId ? a : b;
+            if (!child?.path?.samples?.[0]) return false;
+            if (a === child) return aNear;
+            return true;
+        }
+        const bNear = nearBasePoint(b, pt);
+        if (!aNear || !bNear) return false;
+        return true;
+    };
 
     const startIdx = (b) => {
         const n = b.path.samples.length;
-        return Math.min(n - 2, Math.max(1, Math.floor(n * (b.baseAllowT ?? 0.25))));
+        return Math.min(n - 2, Math.max(1, Math.floor(n * baseAllowT(b))));
     };
 
-    // Branch-vs-branch collisions (ignore first 25% base allowance on both branches).
+    // Branch-vs-branch collisions (ignore first 50% base allowance on both branches).
     for (let i = 0; i < branches.length; i++) {
         for (let j = i + 1; j < branches.length; j++) {
             const a = branches[i];
@@ -463,6 +621,7 @@ function annotatePlannedCollisions(allBranches) {
                     const qw = ((q0.w || 1) + (q1.w || 1)) * 0.5;
                     const minDist = (p.w || 1) * 0.5 + qw * 0.5;
                     if (d2 < minDist * minDist * 0.65) {
+                        if (naturalBaseOnly(a, b, p, ai)) continue;
                         found = { x: p.x, y: p.y };
                         break;
                     }
@@ -498,12 +657,14 @@ function annotatePlannedCollisions(allBranches) {
     // Leaf-vs-branch body collisions by polygon intersection (outside base-allow zone).
     const branchPolys = branches.map((b) => ({
         b,
-        poly: buildBranchPolyFromPath(b.path, b.baseAllowT ?? 0.25),
+        poly: buildBranchPolyFromPath(b.path, baseAllowT(b)),
     }));
     for (const lp of leafPolys) {
         for (const bp of branchPolys) {
             if (!bp.poly.length) continue;
             if (polysIntersect(lp.poly, bp.poly)) {
+                const basePt = lp.b.path?.samples?.[0] || lp.b.leafData;
+                if (basePt && naturalBaseOnly(lp.b, bp.b, basePt, 0)) continue;
                 lp.b.leafCollision = true;
                 const hit = { x: lp.b.leafData.x, y: lp.b.leafData.y };
                 lp.b.collisionPoints.push(hit);
@@ -555,6 +716,7 @@ function annotatePlannedCollisions(allBranches) {
                     const bw = ((s0.w || 1) + (s1.w || 1)) * 0.5;
                     const minDist = c.r + bw * 0.5;
                     if (d2 < minDist * minDist) {
+                        if (naturalBaseOnly(leafBranch, br, c, 0)) continue;
                         hit = { x: c.x, y: c.y };
                         break;
                     }
@@ -609,7 +771,7 @@ function buildLeafPolygonFromData(leaf, steps = 10) {
     });
 }
 
-function buildBranchPolyFromPath(path, baseAllowT = 0.25) {
+function buildBranchPolyFromPath(path, baseAllowT = 0.5) {
     if (!path?.left || !path?.right) return [];
     const n = Math.min(path.left.length, path.right.length);
     if (n < 4) return [];
@@ -662,7 +824,7 @@ function polysIntersect(a, b) {
 }
 
 function resizeCanvas() {
-    const area = document.getElementById("canvas-area");
+    const area = document.getElementById("canvas-stage") || document.getElementById("canvas-area");
     const rect = area.getBoundingClientRect();
     updateDpr();
     canvas.width = rect.width * dpr;
@@ -732,12 +894,11 @@ let isNavigating = false;   // true while user is scrubbing history
 
 function pushRule(text, targetNodeId) {
     if (!text) return;
-    // Don't push a duplicate of the last entry
-    if (ruleHistory.length > 0 && ruleHistory[ruleHistory.length - 1].rule === text) return;
-    // Snapshot only when we actually record a new rule.
-    const snap = snapshotBranches(state.allBranches);
+    const last = ruleHistory.length ? ruleHistory[ruleHistory.length - 1] : null;
+    if (last && last.rule === text && last.targetNodeId === targetNodeId) return;
     // Only follow the tail if we were already there
     const wasAtTail = ruleHistoryCursor === -1 || ruleHistoryCursor === ruleHistory.length - 1;
+    const snap = snapshotBranches(state.allBranches);
     ruleHistory.push({ rule: text, snapshot: snap, targetNodeId });
     if (wasAtTail) {
         ruleHistoryCursor = ruleHistory.length - 1;
@@ -766,14 +927,71 @@ function updateRuleDisplay() {
     // Restore tree geometry to this step's snapshot (only while scrubbing)
     if (isNavigating && entry.snapshot && state.allBranches.length) {
         restoreBranches(state.allBranches, entry.snapshot);
-        // Clear all white highlights then highlight the target branch
-        for (const b of state.allBranches) b.isHighlightWhite = false;
-        if (entry.targetNodeId) {
-            const target = state.allBranches.find(b => b.nodeId === entry.targetNodeId);
+        for (const b of state.allBranches) {
+            b.isHighlightWhite = false;
+            b.isHighlightGreen = false;
+        }
+        if (entry.targetNodeId != null) {
+            const target = state.allBranches.find((b) => b.nodeId === entry.targetNodeId);
             if (target) target.isHighlightWhite = true;
         }
         renderScene(state);
     }
+}
+
+function runRulePreview(ruleId) {
+    const cfg = rulePreviewConfigs.find((x) => x.id === ruleId);
+    if (!cfg) return;
+    if (state.agent.active) state.agent.stop(state);
+    const snapshot = makeRulePreviewTree(ruleId);
+    loadTreeSnapshot(snapshot);
+    if (modeSelect.value !== cfg.mode) modeSelect.value = cfg.mode;
+    syncUI();
+    currentEpochSeed = rulePreviewSeeds[ruleId] || 12345;
+    generateTree(true);
+
+    // Reset rule history for this preview run.
+    ruleHistory.length = 0;
+    ruleHistoryCursor = -1;
+    isNavigating = false;
+    updateRuleDisplay();
+
+    state.agent.start(state);
+    state.agent.currentRule = `Preview: ${cfg.label} scenario loaded. Deploying agent...`;
+}
+
+function openRulePreviewPanel() {
+    if (!rulePreviewPanel) return;
+    rulePreviewPanel.classList.remove("hidden");
+}
+
+function closeRulePreviewPanel() {
+    if (!rulePreviewPanel) return;
+    rulePreviewPanel.classList.add("hidden");
+}
+
+function initRulePreviewUI() {
+    if (!rulePreviewActions) return;
+    rulePreviewActions.innerHTML = "";
+    for (const cfg of rulePreviewConfigs) {
+        const b = document.createElement("button");
+        b.className = "btn btn-secondary";
+        b.textContent = cfg.label;
+        b.addEventListener("click", () => runRulePreview(cfg.id));
+        rulePreviewActions.appendChild(b);
+    }
+}
+
+initRulePreviewUI();
+if (btnPreviewRules) {
+    btnPreviewRules.addEventListener("click", () => {
+        if (!rulePreviewPanel) return;
+        if (rulePreviewPanel.classList.contains("hidden")) openRulePreviewPanel();
+        else closeRulePreviewPanel();
+    });
+}
+if (btnCloseRulePreview) {
+    btnCloseRulePreview.addEventListener("click", closeRulePreviewPanel);
 }
 
 if (btnRulePrev) {
@@ -794,12 +1012,55 @@ if (btnRuleNext) {
     });
 }
 
+function attachHoldNavigate(btn, stepFn) {
+    if (!btn) return;
+    let holdDelay = null;
+    let holdTick = null;
+    const clear = () => {
+        if (holdDelay) clearTimeout(holdDelay);
+        if (holdTick) clearInterval(holdTick);
+        holdDelay = null;
+        holdTick = null;
+    };
+    const start = () => {
+        clear();
+        holdDelay = setTimeout(() => {
+            holdTick = setInterval(() => {
+                if (!btn.disabled) stepFn();
+            }, 55);
+        }, 220);
+    };
+    btn.addEventListener("mousedown", start);
+    btn.addEventListener("touchstart", start, { passive: true });
+    btn.addEventListener("mouseup", clear);
+    btn.addEventListener("mouseleave", clear);
+    btn.addEventListener("touchend", clear);
+    btn.addEventListener("touchcancel", clear);
+    window.addEventListener("blur", clear);
+}
+
+attachHoldNavigate(btnRulePrev, () => {
+    const idx = ruleHistoryCursor < 0 ? ruleHistory.length - 1 : ruleHistoryCursor;
+    ruleHistoryCursor = Math.max(0, idx - 1);
+    isNavigating = true;
+    updateRuleDisplay();
+});
+attachHoldNavigate(btnRuleNext, () => {
+    const idx = ruleHistoryCursor < 0 ? ruleHistory.length - 1 : ruleHistoryCursor;
+    ruleHistoryCursor = Math.min(ruleHistory.length - 1, idx + 1);
+    isNavigating = ruleHistoryCursor < ruleHistory.length - 1;
+    updateRuleDisplay();
+});
+
 if (btnDeployAgent) {
     btnDeployAgent.addEventListener("click", () => {
         ruleHistory.length = 0;
         ruleHistoryCursor = -1;
         isNavigating = false;
-        for (const b of state.allBranches) b.isHighlightWhite = false;
+        for (const b of state.allBranches) {
+            b.isHighlightWhite = false;
+            b.isHighlightGreen = false;
+        }
         updateRuleDisplay();
         state.agent.start(state);
     });

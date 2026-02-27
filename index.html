@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap"
         rel="stylesheet" />
-    <link rel="stylesheet" href="index.css?v=17" />
+    <link rel="stylesheet" href="index.css?v=21" />
 </head>
 
 <body>
@@ -209,7 +209,7 @@
                             <span id="rule-step-counter" style="font-size:0.7rem; color:rgba(255,255,255,0.5);">— /
                                 —</span>
                         </div>
-                        <div id="agent-debug-rule"
+                        <div id="agent-debug-rule" class="rule-info-box"
                             style="font-size: 0.75rem; color: #ffcc00; padding: 6px; background: rgba(0,0,0,0.3); border-radius: 4px; line-height: 1.4; min-height: 2.8em;">
                             No agent active</div>
                         <div style="display:flex; gap:4px; justify-content:flex-end;">
@@ -248,10 +248,20 @@
                 <button id="btn-generate" class="btn btn-primary">🌱 Generate</button>
                 <button id="btn-download" class="btn btn-secondary">💾 PNG</button>
                 <button id="btn-save" class="btn btn-secondary" onclick="window.__openSaveManager?.()">💾 Save</button>
+                <button id="btn-preview-rules" class="btn btn-secondary">🧪 Preview</button>
             </div>
         </aside>
         <main id="canvas-area">
-            <canvas id="tree-canvas"></canvas>
+            <div id="canvas-stage">
+                <canvas id="tree-canvas"></canvas>
+            </div>
+            <aside id="rule-preview-panel" class="rule-preview-panel hidden">
+                <div class="rule-preview-head">
+                    <h3>Rule Preview</h3>
+                    <button id="btn-close-rule-preview" class="btn btn-secondary">Close</button>
+                </div>
+                <div id="rule-preview-actions" class="rule-preview-actions"></div>
+            </aside>
         </main>
     </div>
     <div id="save-manager-modal" class="save-manager-modal">
@@ -267,7 +277,7 @@
             <div id="saved-list" class="saved-list"></div>
         </div>
     </div>
-    <script type="module" src="js/app.js?v=13"></script>
+    <script type="module" src="js/app.js?v=19"></script>
 </body>
 
 </html>

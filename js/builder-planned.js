@@ -448,7 +448,7 @@ export function buildBranchPlanned(
         ranges: profile,
         leafData,
         collisionAtBase,
-        baseAllowT: 0.25,
+        baseAllowT: 0.5,
         minT: lateralMinT,
         maxT: lateralMaxT,
     });
