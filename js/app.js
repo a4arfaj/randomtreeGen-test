@@ -42,6 +42,7 @@ import {
     findClosestFreeDot,
     tuneDotRangesForTree,
 } from "./builder-dot.js";
+import { buildBranchAITree } from "./builder-aitree.js";
 import { Agent, snapshotBranches, restoreBranches } from "./agent.js";
 import { buildLeafCollisionCircles } from "./leaf.js";
 
@@ -85,6 +86,7 @@ const rulePreviewConfigs = [
     { id: "condensing", label: "Condensing", mode: "planned" },
     { id: "elongating", label: "Elongating", mode: "planned" },
     { id: "rebuild", label: "Rebuild", mode: "planned" },
+    { id: "ai-tree", label: "AI Tree", mode: "ai-tree" },
 ];
 
 const rulePreviewSeeds = {
@@ -97,6 +99,7 @@ const rulePreviewSeeds = {
     condensing: 70707,
     elongating: 82828,
     rebuild: 90909,
+    "ai-tree": 12345,
 };
 
 function readSavedHierarchies() {
@@ -444,6 +447,26 @@ function makeRulePreviewTree(ruleId) {
                 previewNode([previewNode([L(), L(), L()]), L()]),
                 previewNode([previewNode([L(), L()]), previewNode([L()])]),
             ]);
+        case "ai-tree":
+            return (() => {
+                const subChildrenCounts = [
+                    2, 1, 3, 2, 1, 3, 2, 1, 2, 3, 1, 2, 1,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+                ];
+                let cIdx = 0;
+                const branches = [];
+                for (let i = 0; i < 9; i++) {
+                    const c4 = [];
+                    for (let j = 0; j < 4; j++) {
+                        const count = subChildrenCounts[cIdx++];
+                        const kids = [];
+                        for (let k = 0; k < count; k++) kids.push(L());
+                        c4.push(previewNode(kids));
+                    }
+                    branches.push(previewNode(c4));
+                }
+                return previewNode(branches);
+            })();
         case "rotating":
         default:
             return previewNode([
@@ -518,6 +541,22 @@ function generateTree(isRetry = false) {
             state.allBranches
         );
         annotatePlannedCollisions(state.allBranches);
+        if (state.showDots) refreshDotPreview();
+        else state.dotGridData = null;
+    } else if (state.currentMode === "ai-tree") {
+        tree._targetAngle = 0;
+        const ranges = { leafHue: 115 };
+        buildBranchAITree(
+            tree,
+            W / 2,
+            groundY,
+            0,
+            H * 0.22,
+            45,
+            0,
+            ranges,
+            state.allBranches
+        );
         if (state.showDots) refreshDotPreview();
         else state.dotGridData = null;
     } else if (state.currentMode === "dot") {
@@ -947,6 +986,7 @@ function runRulePreview(ruleId) {
     loadTreeSnapshot(snapshot);
     if (modeSelect.value !== cfg.mode) modeSelect.value = cfg.mode;
     syncUI();
+    if (cfg.mode === "ai-tree") state.currentMode = "ai-tree"; // Force since it's not in the dropdown
     currentEpochSeed = rulePreviewSeeds[ruleId] || 12345;
     generateTree(true);
 
@@ -956,8 +996,12 @@ function runRulePreview(ruleId) {
     isNavigating = false;
     updateRuleDisplay();
 
-    state.agent.start(state);
-    state.agent.currentRule = `Preview: ${cfg.label} scenario loaded. Deploying agent...`;
+    state.agent.active = false;
+    state.agent.currentRule =
+        ruleId === "ai-tree"
+            ? "AI Tree preview loaded. Agent is idle."
+            : `Preview: ${cfg.label} loaded. Use Deploy Fixer to run the agent.`;
+    updateRuleDisplay();
 }
 
 function openRulePreviewPanel() {

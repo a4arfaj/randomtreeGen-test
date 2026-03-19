@@ -224,7 +224,20 @@ export class Agent {
         while (parentId != null) {
             const parent = state.allBranches.find((b) => b.nodeId === parentId);
             if (parent?.depth === 0) break;
-            if (parent?.path?.samples?.length && this._collectSubtreeCollisions(parent, state).length > 0) {
+            if (!parent?.path?.samples?.length) {
+                parentId = this._parentMap.get(parentId);
+                continue;
+            }
+            // Skip exhausted parents — they should not block children
+            if (this.exhaustedNodes.has(parentId)) {
+                parentId = this._parentMap.get(parentId);
+                continue;
+            }
+            // Only block if the parent ITSELF has collisions (not its subtree).
+            // _scoreSelf already excludes descendants, so this correctly detects
+            // parent-vs-external collisions without the circular child-blocks-self issue.
+            const parentSelfHits = this._scoreSelf(parent, state.allBranches).hits;
+            if (parentSelfHits > 0) {
                 return true;
             }
             parentId = this._parentMap.get(parentId);
@@ -1176,8 +1189,8 @@ export class Agent {
         this.currentRule = partialPassOpened
             ? `Rule: ${this._label(orig)} ${orig.nodeId} got partial space from passing. Returning to it.`
             : cascadeNext
-            ? `Rule: ${this._label(orig)} ${orig.nodeId} trying cascading result space. Returning to it.`
-            : `Rule: ${this._label(orig)} ${orig.nodeId} now has space. Returning to it.`;
+                ? `Rule: ${this._label(orig)} ${orig.nodeId} trying cascading result space. Returning to it.`
+                : `Rule: ${this._label(orig)} ${orig.nodeId} now has space. Returning to it.`;
         return true;
     }
 
@@ -1264,6 +1277,62 @@ export class Agent {
         return Math.min(n - 1, this._baseSampleLimit(b));
     }
 
+    _branchSideAgainstParentAxis(branch, state) {
+        if (!branch?.path?.samples?.length) return 0;
+        const pId = this._parentMap.get(branch.nodeId);
+        if (pId == null) return 0;
+        const parent = state?.allBranches?.find((b) => b.nodeId === pId);
+        if (!parent?.path?.samples?.length) return 0;
+
+        const pivot = branch.path.samples[0];
+        let parentSampleIdx = 0;
+        let minDist = Infinity;
+        for (let i = 0; i < parent.path.samples.length; i++) {
+            const p = parent.path.samples[i];
+            if (!p) continue;
+            const d = Math.hypot(p.x - pivot.x, p.y - pivot.y);
+            if (d < minDist) { minDist = d; parentSampleIdx = i; }
+        }
+        let s1 = parent.path.samples[parentSampleIdx];
+        let s2 = parentSampleIdx + 3 < parent.path.samples.length
+            ? parent.path.samples[parentSampleIdx + 3]
+            : parent.path.samples[parent.path.samples.length - 1];
+        if (s1 === s2 && parentSampleIdx >= 3) s1 = parent.path.samples[parentSampleIdx - 3];
+        if (!s1 || !s2) return 0;
+
+        const ax = s2.x - s1.x;
+        const ay = s2.y - s1.y;
+        const bx = branch.path.tipX - pivot.x;
+        const by = branch.path.tipY - pivot.y;
+        const cross = ax * by - ay * bx;
+        if (Math.abs(cross) < 1e-6) return 0;
+        return cross > 0 ? 1 : -1;
+    }
+
+    _isTipChildBranch(branch, state) {
+        if (!branch?.path?.samples?.length) return false;
+        const pId = this._parentMap.get(branch.nodeId);
+        if (pId == null) return false;
+        const parent = state?.allBranches?.find((b) => b.nodeId === pId);
+        if (!parent?.path?.samples?.length) return false;
+
+        const pivot = branch.path.samples[0];
+        const dTip = Math.hypot(pivot.x - parent.path.tipX, pivot.y - parent.path.tipY);
+        if (dTip <= 8) return true;
+
+        if (!state?.tree) return false;
+        let pNode = null;
+        let bNode = null;
+        const walk = (n) => {
+            if (!n) return;
+            if (n.id === pId) pNode = n;
+            if (n.id === branch.nodeId) bNode = n;
+            for (const c of (n.children || [])) walk(c);
+        };
+        walk(state.tree);
+        return !!(pNode && bNode && pNode.children && pNode.children.indexOf(bNode) === 0);
+    }
+
     _nearBasePoint(b, pt) {
         const p0 = b?.path?.samples?.[0];
         if (!p0 || !pt) return false;
@@ -1281,10 +1350,21 @@ export class Agent {
             : this._nearBasePoint(source, pt);
 
         if (this._isParentChild(source, target)) {
-            const child = this._parentMap.get(source.nodeId) === target.nodeId ? source : target;
-            if (!child?.path?.samples?.[0]) return false;
-            if (source === child) return sourceNearBase;
-            return true;
+            const sourceIsChild = this._parentMap.get(source.nodeId) === target.nodeId;
+            const child = sourceIsChild ? source : target;
+            const parent = sourceIsChild ? target : source;
+            if (!child?.path?.samples?.[0] || !parent?.path?.samples?.[0]) return false;
+
+            // Base/base parent-child contacts are structural and should never be treated
+            // as collisions (regardless of which branch is the sampled source).
+            const nearChildBase = source === child ? sourceNearBase : this._nearBasePoint(child, pt);
+            const nearParentBase = source === parent ? sourceNearBase : this._nearBasePoint(parent, pt);
+            if (nearChildBase || nearParentBase) return true;
+
+            // Parent sampled against child is also treated as a natural connection.
+            if (source === parent) return true;
+            // Child sampled against parent is only natural near the child's base.
+            return sourceNearBase;
         }
 
         const targetNearBase = this._nearBasePoint(target, pt);
@@ -1338,7 +1418,7 @@ export class Agent {
                 if (this._areAdjacent(bd, b2)) continue;
 
                 const s = bd.path.samples;
-                for (let k = this._sampleProbeStart(bd); k < s.length; k += 3) {
+                for (let k = this._sampleProbeStart(bd); k < s.length; k++) {
                     if (!s[k]) continue;
                     if (this._pointHitsBranch(bd, b2, s[k], k)) {
                         contacts.add(j);
@@ -1379,6 +1459,16 @@ export class Agent {
     // ── Score a single branch by its OWN geometry's overlaps ─────────────────
     // Only checks b1.path.samples against external branches (no subtree walk).
     // Returns { hits, collidingBranch, overlapMinIdx, overlapMaxIdx }
+    _isDescendant(possibleParent, possibleChild) {
+        if (!possibleParent || !possibleChild) return false;
+        let pId = this._parentMap.get(possibleChild.nodeId);
+        while (pId != null) {
+            if (pId === possibleParent.nodeId) return true;
+            pId = this._parentMap.get(pId);
+        }
+        return false;
+    }
+
     _scoreSelf(b1, allBranches) {
         if (!b1.path?.samples) return { hits: 0, partners: 0 };
         const s = b1.path.samples;
@@ -1391,6 +1481,7 @@ export class Agent {
             if (b2 === b1) continue;
             if (!b2.path2d) continue;
             if (this._areAdjacent(b1, b2)) continue;
+            if (this._isDescendant(b1, b2)) continue;
 
             let hits = 0, minI = Infinity, maxI = -1;
             // Check every sample (dense scan – only on one branch, so cheap)
@@ -1439,70 +1530,52 @@ export class Agent {
     //
     // This forces the agent to work the tree from parent toward child.
     _findBestTarget(state) {
-        const grouped = new Map();
+        const candidates = [];
 
         for (const b1 of state.allBranches) {
             if (b1.depth === 0) continue;
             if (!b1.path2d) continue;
             if (!b1.path?.samples?.length) continue;
-
+            if (this.exhaustedNodes.has(b1.nodeId)) continue;
             const r = this._scoreSelf(b1, state.allBranches);
             if (r.hits <= 0) continue;
-
-            const pivotB1 = this._promoteToSelectableAncestor(b1, state);
-            if (!pivotB1) continue;
-            if (this.exhaustedNodes.has(pivotB1.nodeId)) continue;
-
-            const key = pivotB1.nodeId;
-            if (!grouped.has(key)) {
-                grouped.set(key, {
-                    pivotB1,
-                    totalHits: 0,
-                    totalPartners: 0,
-                    rawB1: b1,
-                    r,
-                });
-            }
-
-            const entry = grouped.get(key);
-            entry.totalHits += r.hits;
-            entry.totalPartners += r.partners;
-            if (
-                !entry.rawB1 ||
-                r.hits > entry.r.hits ||
-                (r.hits === entry.r.hits && b1.depth < entry.rawB1.depth)
-            ) {
-                entry.rawB1 = b1;
-                entry.r = r;
-            }
+            if (!r.collidingBranch) continue;
+            // Allow branch through if it collides with its own ancestor
+            // (parent-child collision → we target the child).
+            // Otherwise enforce strict parent-first: block if ancestor unresolved.
+            const hasAncestorPartner = this._isDescendant(r.collidingBranch, b1);
+            if (!hasAncestorPartner && !this._canSelectBranch(b1, state)) continue;
+            candidates.push({ b1, r });
         }
 
-        const candidates = [...grouped.values()];
         if (candidates.length === 0) return null;
 
+        // STRICT depth-ascending sort: always process parents before children.
+        // Tiebreak by hits descending, then partners descending.
         candidates.sort((a, b) => {
-            if (a.pivotB1.depth !== b.pivotB1.depth) return a.pivotB1.depth - b.pivotB1.depth;
-            if (a.totalHits !== b.totalHits) return b.totalHits - a.totalHits;
-            return b.totalPartners - a.totalPartners;
+            if (a.b1.depth !== b.b1.depth) return a.b1.depth - b.b1.depth;
+            if (a.r.hits !== b.r.hits) return b.r.hits - a.r.hits;
+            return b.r.partners - a.r.partners;
         });
 
-        for (const { pivotB1, rawB1, r, totalHits } of candidates) {
-            const allCollisions = this._collectSubtreeCollisions(pivotB1, state);
-            return {
-                b1: pivotB1,
-                collidingBranch: r.collidingBranch,
-                overlapBranch: rawB1,
-                overlapMinIdx: r.overlapMinIdx,
-                overlapMaxIdx: r.overlapMaxIdx,
-                isLeafBody: r.isLeafBody,
-                allCollisions,
-                initialTotalHits: allCollisions.reduce((s, c) => s + c.hits, 0),
-                score: totalHits,
-                targetX: pivotB1.path.samples[0].x,
-                targetY: pivotB1.path.samples[0].y,
-            };
-        }
-        return null; // every candidate's pivot is exhausted
+        let { b1, r } = candidates[0];
+        const allCollisions = this._collectSubtreeCollisions(b1, state).filter(
+            (c) => c?.overlapBranch?.nodeId === b1.nodeId
+        );
+        const selfHits = this._sumCollisionHits(allCollisions) || r.hits;
+        return {
+            b1,
+            collidingBranch: r.collidingBranch,
+            overlapBranch: b1,
+            overlapMinIdx: r.overlapMinIdx,
+            overlapMaxIdx: r.overlapMaxIdx,
+            isLeafBody: r.isLeafBody,
+            allCollisions,
+            initialTotalHits: selfHits,
+            score: selfHits,
+            targetX: b1.path.samples[0].x,
+            targetY: b1.path.samples[0].y,
+        };
     }
 
     // ── Collect ALL collision pairs across a branch's full subtree ────────────
@@ -1589,7 +1662,7 @@ export class Agent {
         for (const bd of descendants) {
             if (!bd.path?.samples) continue;
             const s = bd.path.samples;
-            for (let k = this._sampleProbeStart(bd); k < s.length; k += 3) {
+            for (let k = this._sampleProbeStart(bd); k < s.length; k++) {
                 const pt = s[k];
                 if (!pt) continue;
                 const dx = pt.x - cx, dy = pt.y - cy;
@@ -1602,6 +1675,7 @@ export class Agent {
                     if (descSet.has(b2)) continue;
                     if (!b2.path2d) continue;
                     if (this._areAdjacent(bd, b2)) continue;
+                    if (this._isDescendant(bd, b2)) continue;
                     if (this._pointHitsBranch(bd, b2, { x: rx, y: ry }, k)) return true;
                 }
             }
@@ -1616,6 +1690,7 @@ export class Agent {
                         if (descSet.has(b2)) continue;
                         if (!b2.path2d) continue;
                         if (this._areAdjacent(bd, b2)) continue;
+                        if (this._isDescendant(bd, b2)) continue;
                         if (this._pointHitsBranch(bd, b2, { x: rx, y: ry }, -1)) return true;
                     }
                 }
@@ -1678,7 +1753,7 @@ export class Agent {
                 if (descSet.has(b2)) continue;
                 if (!b2.path2d) continue;
                 if (this._areAdjacent(bd, b2)) continue;
-                for (let k = this._sampleProbeStart(bd); k < s.length; k += 3) {
+                for (let k = this._sampleProbeStart(bd); k < s.length; k++) {
                     if (!s[k]) continue;
                     if (this._pointHitsBranch(bd, b2, s[k], k)) return true;
                 }
@@ -1699,6 +1774,15 @@ export class Agent {
     _calcLimitsToParent(b, state, defaultMaxA) {
         let maxPos = defaultMaxA;
         let maxNeg = defaultMaxA;
+
+        if (this._isTipChildBranch(b, state)) {
+            const tipCap = deg2rad(20);
+            maxPos = Math.min(maxPos, tipCap);
+            maxNeg = Math.min(maxNeg, tipCap);
+            // Tip branches must be allowed to search both ways around current pose.
+            // Do not further clamp by parent-side bias here.
+            return { maxPos, maxNeg };
+        }
 
         const parentId = this._parentMap.get(b.nodeId);
         if (parentId == null) return { maxPos, maxNeg };
@@ -1783,7 +1867,7 @@ export class Agent {
                     if (descSet.has(b2) || !b2.path?.samples) continue;
                     if (this._areAdjacent(bd, b2)) continue;
                     const s2 = b2.path.samples;
-                    for (let k = this._sampleProbeStart(b2); k < s2.length; k += 2) {
+                    for (let k = this._sampleProbeStart(b2); k < s2.length; k++) {
                         if (!s2[k]) continue;
                         // Inverse-rotate external point to test against descendant's original path
                         const dx2 = s2[k].x - cx, dy2 = s2[k].y - cy;
@@ -1832,6 +1916,402 @@ export class Agent {
         return { angle: bestAngle, dir: bestDir, hits: bestHits };
     }
 
+    _getPriorContacts(descendants, allBranches) {
+        const descSet = new Set(descendants);
+        const prior = new Map();
+        for (const bd of descendants) {
+            const hits = new Set();
+            if (!bd.path?.samples) continue;
+            const s = bd.path.samples;
+            for (let k = this._sampleProbeStart(bd); k < s.length; k++) {
+                const pt = s[k];
+                if (!pt) continue;
+                for (let j = 0; j < allBranches.length; j++) {
+                    const b2 = allBranches[j];
+                    if (descSet.has(b2) || !b2.path2d) continue;
+                    if (this._areAdjacent(bd, b2)) continue;
+                    if (this._pointHitsBranch(bd, b2, pt, k)) hits.add(b2.nodeId);
+                }
+            }
+            if (bd.path2d) {
+                for (const b2 of allBranches) {
+                    if (descSet.has(b2) || !b2.path?.samples) continue;
+                    if (this._areAdjacent(bd, b2)) continue;
+                    const s2 = b2.path.samples;
+                    for (let k = this._sampleProbeStart(b2); k < s2.length; k++) {
+                        if (!s2[k]) continue;
+                        if (this._pointHitsBranch(b2, bd, s2[k], k)) hits.add(b2.nodeId);
+                    }
+                }
+            }
+            if (bd.isLeaf && bd.leafData) {
+                for (const pt of this._leafProbePointsFromBranch(bd)) {
+                    for (let j = 0; j < allBranches.length; j++) {
+                        const b2 = allBranches[j];
+                        if (descSet.has(b2) || !b2.path2d) continue;
+                        if (this._areAdjacent(bd, b2)) continue;
+                        if (this._pointHitsBranch(bd, b2, pt, -1)) hits.add(b2.nodeId);
+                    }
+                }
+            }
+            prior.set(bd.nodeId, hits);
+        }
+        return prior;
+    }
+
+    _checkValidAngle(descendants, enforceZeroNode, allBranches, totalAngle, pivot, priorContacts) {
+        const cos = Math.cos(totalAngle);
+        const sin = Math.sin(totalAngle);
+        const cx = pivot.x, cy = pivot.y;
+        const descSet = new Set(descendants);
+
+        for (const bd of descendants) {
+            const isTargetZero = enforceZeroNode && (bd.nodeId === enforceZeroNode.nodeId);
+            const prior = priorContacts.get(bd.nodeId) || new Set();
+
+            if (!bd.path?.samples) continue;
+            const s = bd.path.samples;
+
+            for (let k = this._sampleProbeStart(bd); k < s.length; k++) {
+                const pt = s[k];
+                if (!pt) continue;
+                const dx = pt.x - cx, dy = pt.y - cy;
+                const rx = cx + dx * cos - dy * sin;
+                const ry = cy + dx * sin + dy * cos;
+                for (let j = 0; j < allBranches.length; j++) {
+                    const b2 = allBranches[j];
+                    if (descSet.has(b2) || !b2.path2d) continue;
+                    if (this._areAdjacent(bd, b2)) continue;
+                    if (this._isDescendant(bd, b2)) continue;
+                    if (this._pointHitsBranch(bd, b2, { x: rx, y: ry }, k)) {
+                        if (isTargetZero) return false;
+                        if (!prior.has(b2.nodeId)) return false;
+                    }
+                }
+            }
+            if (bd.path2d) {
+                for (let j = 0; j < allBranches.length; j++) {
+                    const b2 = allBranches[j];
+                    if (descSet.has(b2) || !b2.path?.samples) continue;
+                    if (this._areAdjacent(bd, b2)) continue;
+                    if (this._isDescendant(bd, b2)) continue;
+                    const s2 = b2.path.samples;
+                    for (let k = this._sampleProbeStart(b2); k < s2.length; k++) {
+                        if (!s2[k]) continue;
+                        const dx2 = s2[k].x - cx, dy2 = s2[k].y - cy;
+                        const irx = cx + dx2 * cos + dy2 * sin;
+                        const iry = cy - dx2 * sin + dy2 * cos;
+                        if (this._pointHitsBranch(b2, bd, { x: irx, y: iry }, k)) {
+                            if (isTargetZero) return false;
+                            if (!prior.has(b2.nodeId)) return false;
+                        }
+                    }
+                }
+            }
+            if (bd.isLeaf && bd.leafData) {
+                for (const pt of this._leafProbePointsFromBranch(bd)) {
+                    const dx = pt.x - cx, dy = pt.y - cy;
+                    const rx = cx + dx * cos - dy * sin;
+                    const ry = cy + dx * sin + dy * cos;
+                    for (let j = 0; j < allBranches.length; j++) {
+                        const b2 = allBranches[j];
+                        if (descSet.has(b2) || !b2.path2d) continue;
+                        if (this._areAdjacent(bd, b2)) continue;
+                        if (this._isDescendant(bd, b2)) continue;
+                        if (this._pointHitsBranch(bd, b2, { x: rx, y: ry }, -1)) {
+                            if (isTargetZero) return false;
+                            if (!prior.has(b2.nodeId)) return false;
+                        }
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    _findShortestZeroCollisionAngle(descendants, enforceZeroNode, allBranches, pivot, maxPos, maxNeg, priorContacts) {
+        const step = deg2rad(5);
+        let validAngles = [];
+
+        for (let a = 0; a <= maxPos + 0.001; a += step) {
+            if (this._checkValidAngle(descendants, enforceZeroNode, allBranches, a, pivot, priorContacts)) {
+                validAngles.push({ angle: a, dir: 1, dist: a });
+            }
+        }
+        for (let a = step; a <= maxNeg + 0.001; a += step) {
+            if (this._checkValidAngle(descendants, enforceZeroNode, allBranches, -a, pivot, priorContacts)) {
+                validAngles.push({ angle: a, dir: -1, dist: a });
+            }
+        }
+
+        if (validAngles.length === 0) return { success: false, hits: Infinity, angle: 0, dir: 1 };
+
+        validAngles.sort((a, b) => a.dist - b.dist);
+        const best = validAngles[0];
+        return { success: true, angle: best.angle, dir: best.dir, hits: 0 };
+    }
+
+    _snapshot(branches) {
+        return branches.map(b => ({
+            left: b.path?.left?.map(p => ({ x: p.x, y: p.y })),
+            right: b.path?.right?.map(p => ({ x: p.x, y: p.y })),
+            samples: b.path?.samples?.map(p => p ? { x: p.x, y: p.y } : null),
+            tipX: b.path?.tipX, tipY: b.path?.tipY,
+            tipNormX: b.path?.tipNormX, tipNormY: b.path?.tipNormY,
+            tipTangentAngle: b.path?.tipTangentAngle,
+            leafData: b.leafData ? { ...b.leafData } : null,
+        }));
+    }
+
+    _restore(branches, snap) {
+        for (let i = 0; i < branches.length; i++) {
+            const bd = branches[i];
+            const pre = snap[i];
+            if (bd.path && pre.left && pre.right) {
+                bd.path.left = pre.left.map(p => ({ x: p.x, y: p.y }));
+                bd.path.right = pre.right.map(p => ({ x: p.x, y: p.y }));
+            }
+            if (bd.path?.samples && pre.samples) {
+                for (let j = 0; j < pre.samples.length; j++) {
+                    if (pre.samples[j] && bd.path.samples[j]) {
+                        bd.path.samples[j].x = pre.samples[j].x;
+                        bd.path.samples[j].y = pre.samples[j].y;
+                    }
+                }
+            }
+            if (bd.path) {
+                bd.path.tipX = pre.tipX; bd.path.tipY = pre.tipY;
+                bd.path.tipNormX = pre.tipNormX; bd.path.tipNormY = pre.tipNormY;
+                bd.path.tipTangentAngle = pre.tipTangentAngle;
+            }
+            if (bd.leafData && pre.leafData) Object.assign(bd.leafData, pre.leafData);
+            rebuildPath2d(bd);
+        }
+    }
+
+    _flipTree(descendants, pivot, nx, ny, axisAngle) {
+        const reflectPt = (p) => {
+            if (!p) return;
+            const dx = p.x - pivot.x, dy = p.y - pivot.y;
+            const dot = dx * nx + dy * ny;
+            p.x = pivot.x + 2 * dot * nx - dx;
+            p.y = pivot.y + 2 * dot * ny - dy;
+        };
+
+        for (const bd of descendants) {
+            if (bd.path?.samples) for (const p of bd.path.samples) reflectPt(p);
+            if (bd.path?.left) for (const p of bd.path.left) reflectPt(p);
+            if (bd.path?.right) for (const p of bd.path.right) reflectPt(p);
+            if (bd.path) {
+                const tip = { x: bd.path.tipX, y: bd.path.tipY };
+                reflectPt(tip);
+                bd.path.tipX = tip.x; bd.path.tipY = tip.y;
+                const tn = { x: pivot.x + bd.path.tipNormX, y: pivot.y + bd.path.tipNormY };
+                reflectPt(tn);
+                bd.path.tipNormX = tn.x - pivot.x; bd.path.tipNormY = tn.y - pivot.y;
+                bd.path.tipTangentAngle = 2 * axisAngle - bd.path.tipTangentAngle;
+                const tmpEdge = bd.path.left;
+                bd.path.left = bd.path.right;
+                bd.path.right = tmpEdge;
+            }
+            if (bd.leafData) {
+                const lp = { x: bd.leafData.x, y: bd.leafData.y };
+                reflectPt(lp);
+                bd.leafData.x = lp.x; bd.leafData.y = lp.y;
+                bd.leafData.angle = 2 * axisAngle - bd.leafData.angle + Math.PI;
+            }
+            rebuildPath2d(bd);
+        }
+    }
+
+    _getFlipAxis(element, state) {
+        let pId = this._parentMap.get(element.nodeId);
+        let parentBr = pId != null ? state.allBranches.find(b => b.nodeId === pId) : null;
+        if (!parentBr || !parentBr.path?.samples || parentBr.path.samples.length <= 1) return null;
+        let pivot = element.path.samples[0];
+        let closestIdx = 0, closestDist = Infinity;
+        for (let i = 0; i < parentBr.path.samples.length; i++) {
+            const ps = parentBr.path.samples[i];
+            if (!ps) continue;
+            const d = Math.hypot(ps.x - pivot.x, ps.y - pivot.y);
+            if (d < closestDist) { closestDist = d; closestIdx = i; }
+        }
+        const ps1 = parentBr.path.samples[closestIdx];
+        const ps2 = parentBr.path.samples[Math.min(closestIdx + 3, parentBr.path.samples.length - 1)];
+        if (!ps1 || !ps2 || (ps1.x === ps2.x && ps1.y === ps2.y)) return null;
+        const ax = ps2.x - ps1.x, ay = ps2.y - ps1.y;
+        const alen = Math.hypot(ax, ay);
+        const nx = ax / alen, ny = ay / alen;
+        return { nx, ny, axisAngle: Math.atan2(ny, nx) };
+    }
+
+    _rotatoflip(element, state) {
+        if (!element?.path?.samples?.length) return { success: false };
+        const descendants = this._buildDescendants(element, state);
+        const pivot = element.path.samples[0];
+        const maxA = deg2rad(90);
+        const { maxPos, maxNeg } = this._calcLimitsToParent(element, state, maxA);
+        const originalSide = this._branchSideAgainstParentAxis(element, state);
+
+        const priorContacts = this._getPriorContacts(descendants, state.allBranches);
+        const bestRot = this._findShortestZeroCollisionAngle(
+            descendants, element, state.allBranches, pivot, maxPos, maxNeg, priorContacts
+        );
+        if (bestRot.success) return { success: true, angle: bestRot.angle * bestRot.dir, flip: false };
+
+        const axis = this._getFlipAxis(element, state);
+        if (axis) {
+            const preFlip = this._snapshot(descendants);
+            this._flipTree(descendants, pivot, axis.nx, axis.ny, axis.axisAngle);
+            const flippedSide = this._branchSideAgainstParentAxis(element, state);
+            if (originalSide !== 0 && flippedSide !== 0 && flippedSide === originalSide) {
+                this._restore(descendants, preFlip);
+                return { success: false };
+            }
+
+            const flipRot = this._findShortestZeroCollisionAngle(
+                descendants, element, state.allBranches, pivot, maxPos, maxNeg, priorContacts
+            );
+            this._restore(descendants, preFlip);
+
+            if (flipRot.success) {
+                return { success: true, angle: flipRot.angle * flipRot.dir, flip: true, flipAxis: axis };
+            }
+        }
+        return { success: false };
+    }
+
+    _rotatoflip2(actor, primary, state) {
+        if (!actor?.path?.samples?.length) return { success: false };
+        const actorDescendants = this._buildDescendants(actor, state);
+        const actorPivot = actor.path.samples[0];
+        const maxA = deg2rad(90);
+        const { maxPos: aMaxPos, maxNeg: aMaxNeg } = this._calcLimitsToParent(actor, state, maxA);
+
+        const step = deg2rad(5);
+        const axis = this._getFlipAxis(actor, state);
+        let actorPriorContacts = this._getPriorContacts(actorDescendants, state.allBranches);
+
+        let validPlans = [];
+        const tryCombination = (actorAngle, isFlip) => {
+            const preActor = this._snapshot(actorDescendants);
+
+            if (isFlip && axis) {
+                this._flipTree(actorDescendants, actorPivot, axis.nx, axis.ny, axis.axisAngle);
+            }
+            if (actorAngle !== 0) {
+                this._rotateBranchTree(actorDescendants, actorAngle, actorPivot);
+            }
+
+            // check if actor move is valid (no NEW collisions for anyone, enforceZero=null)
+            let isActorValid = this._checkValidAngle(actorDescendants, null, state.allBranches, 0, actorPivot, actorPriorContacts);
+
+            let primarySol = { success: false };
+            if (isActorValid) {
+                primarySol = this._rotatoflip(primary, state);
+            }
+
+            this._restore(actorDescendants, preActor);
+
+            if (primarySol.success) {
+                validPlans.push({
+                    actorAngle,
+                    actorFlip: isFlip,
+                    actorFlipAxis: axis,
+                    primarySol,
+                    dist: Math.abs(actorAngle) + Math.abs(primarySol.angle) + (isFlip ? deg2rad(30) : 0) // slight penalty for flips
+                });
+            }
+        };
+
+        for (let a = 0; a <= aMaxPos + 0.001; a += step) tryCombination(a, false);
+        for (let a = step; a <= aMaxNeg + 0.001; a += step) tryCombination(-a, false);
+
+        if (axis) {
+            for (let a = 0; a <= aMaxPos + 0.001; a += step) tryCombination(a, true);
+            for (let a = step; a <= aMaxNeg + 0.001; a += step) tryCombination(-a, true);
+        }
+
+        if (validPlans.length > 0) {
+            validPlans.sort((a, b) => a.dist - b.dist);
+            return {
+                success: true,
+                actorAngle: validPlans[0].actorAngle,
+                actorFlip: validPlans[0].actorFlip,
+                actorFlipAxis: validPlans[0].actorFlipAxis,
+                primarySol: validPlans[0].primarySol
+            };
+        }
+        return { success: false };
+    }
+
+    * _solveCollisionWorker(primary, state) {
+        const primaryExternalHits = this._sumCollisionHits(this._collectSubtreeCollisions(primary, state));
+        if (primaryExternalHits <= 0) {
+            // Mark exhausted so we don't re-pick this branch endlessly
+            this.exhaustedNodes.add(primary.nodeId);
+            this.testedActorId = null;
+            yield `Primary n${primary.nodeId} has no external collisions (child-only/internal). Exhausting.`;
+            return;
+        }
+
+        const primaryPartners = this._getSelfCollisionPartners(primary, state);
+        const hasAncestorPartner = primaryPartners.some((p) => this._isDescendant(p, primary));
+
+        yield `Primary: n${primary.nodeId} trying rotatoflipping`;
+        let sol = this._rotatoflip(primary, state);
+        if (sol.success) {
+            this.fixPlan = { primary, primarySol: sol };
+            return;
+        }
+
+        yield `primary: n${primary.nodeId} rotatoflipping failed`;
+
+        if (hasAncestorPartner) {
+            // Mark exhausted so we don't loop on it
+            this.exhaustedNodes.add(primary.nodeId);
+            this.testedActorId = null;
+            yield `Primary n${primary.nodeId} collides with ancestor; parent movement blocked. Exhausting.`;
+            return;
+        }
+
+        let parentId = this._parentMap.get(primary.nodeId);
+        while (parentId != null) {
+            let parent = state.allBranches.find(b => b.nodeId === parentId);
+            if (!parent || parent.depth === 0) break;
+
+            yield `primary n${primary.nodeId} escalated to n${parent.nodeId}`;
+            // Highlight the escalated parent in green even while just testing
+            this.testedActorId = parent.nodeId;
+
+            let sol2 = this._rotatoflip2(parent, primary, state);
+            if (sol2.success) {
+                this.fixPlan = { actor: parent, actorSol: sol2, primary, primarySol: sol2.primarySol };
+                return;
+            }
+            parentId = this._parentMap.get(parentId);
+        }
+        yield `Escalation fails`;
+
+        yield `primary: n${primary.nodeId} Trying neighboring`;
+        let pId = this._parentMap.get(primary.nodeId);
+        let siblings = state.allBranches.filter(b => b.nodeId !== primary.nodeId && this._parentMap.get(b.nodeId) === pId);
+        for (let sib of siblings) {
+            // Highlight sibling in green while testing
+            this.testedActorId = sib.nodeId;
+            yield `primary n${primary.nodeId} trying sibling n${sib.nodeId}`;
+            let sol2 = this._rotatoflip2(sib, primary, state);
+            if (sol2.success) {
+                this.fixPlan = { actor: sib, actorSol: sol2, primary, primarySol: sol2.primarySol };
+                return;
+            }
+        }
+        yield `neighboring failed`;
+
+        this.exhaustedNodes.add(primary.nodeId);
+        this.testedActorId = null;
+    }
+
     // ── Leaf Sliding Logic ─────────────────────────────────────────────
     _countCollisionsAtTranslation(descendants, allBranches, dx, dy) {
         const descSet = new Set(descendants);
@@ -1839,7 +2319,7 @@ export class Agent {
         for (const bd of descendants) {
             if (!bd.path?.samples) continue;
             const s = bd.path.samples;
-            for (let k = this._sampleProbeStart(bd); k < s.length; k += 3) {
+            for (let k = this._sampleProbeStart(bd); k < s.length; k++) {
                 const pt = s[k];
                 if (!pt) continue;
                 const rx = pt.x + dx;
@@ -1984,6 +2464,7 @@ export class Agent {
         this.rebuildRayPhase = 0;
         this.elongateJob = null;
         this.primaryNodeId = null;
+        this.testedActorId = null;
         this._elongationFailedFor.clear();
         for (const b of state.allBranches) { if (b) { b.isHighlightWhite = false; b.isHighlightGreen = false; } }
         this.target = null;
@@ -2001,13 +2482,6 @@ export class Agent {
             }
 
             let best = this._findBestTarget(state);
-            if (!best && this.exhaustedNodes.size > 0 && this.madeProgress) {
-                // All non-exhausted branches are clear but we made progress.
-                // Do a new pass over exhausted ones in case space opened up!
-                this.exhaustedNodes.clear();
-                this.madeProgress = false; // Reset for this pass
-                best = this._findBestTarget(state);
-            }
             if (best) {
                 this.target = best;
                 this._setPrimaryNode(best.b1.nodeId);
@@ -2021,7 +2495,7 @@ export class Agent {
                 this.state = "IDLE";
                 this.active = false;
                 this.currentRule = this._hasAnyCollisions(state)
-                    ? "No resolvable collisions left. Remaining collisions appear constrained with current rules."
+                    ? "No resolvable collisions left with current exhausted set. Waiting for another action."
                     : "No collisions left to fix. Agent entering scan sleep.";
             }
 
@@ -2035,571 +2509,136 @@ export class Agent {
 
             if (dist < 6) {
                 // ─── ARRIVED ──────────────────────────────────────────────────────
-                this.currentFixAngle = 0;
-                this.descendants = this._buildDescendants(this.target.b1, state);
-
-                const pivot = this.target.b1.path.samples[0];
-                const maxA = deg2rad(90);
-                const { maxPos, maxNeg } = this._calcLimitsToParent(this.target.b1, state, maxA);
-
-                let parent = null;
-                const pId = this._parentMap.get(this.target.b1.nodeId);
-                if (pId != null) parent = state.allBranches.find(pb => pb.nodeId === pId);
-
-                let bestSlide = null;
-                if (this.target.b1.isLeaf && parent) {
-                    bestSlide = this._findLeastCollisionSlide(this.target.b1, parent, state.allBranches, state);
-                }
-
-                const selfResolveOnly = !this.target.escalatedFrom && !this.target.opensFor && !this.target.condenseFor;
-                const targetSelfHitsAtStart = this._scoreSelf(this.target.b1, state.allBranches).hits;
-                if (selfResolveOnly && targetSelfHitsAtStart <= 0) {
-                    this.exhaustedNodes.add(this.target.b1.nodeId);
-                    this.madeProgress = false;
-                    this.target.b1.isHighlightWhite = false;
-                    this.state = "SCANNING";
-                    this.currentRule = `Rule: ${this._label(this.target.b1)} ${this.target.b1.nodeId} has no collision on its own body. Skipping rotation.`;
-                    return true;
-                }
-                const branchHitsChildren = selfResolveOnly && this._branchHitsOwnDescendants(this.target.b1, state);
-                let allowedPos = maxPos;
-                let allowedNeg = maxNeg;
-                if (selfResolveOnly && !branchHitsChildren) {
-                    const priorContacts = this._getExternalContacts(this.descendants, state.allBranches);
-                    const space = this._probeAvailableSpace(
-                        this.descendants, state.allBranches, pivot, priorContacts, maxPos, maxNeg
-                    );
-                    allowedPos = Math.min(allowedPos, space.spacePos);
-                    allowedNeg = Math.min(allowedNeg, space.spaceNeg);
-                }
-
-                // Find the optimal angle for the active rule.
-                const bestRot = branchHitsChildren
-                    ? { angle: 0, dir: 1, hits: Infinity }
-                    : selfResolveOnly
-                    ? this._findLeastCollisionAngle([this.target.b1], state.allBranches, pivot, allowedPos, allowedNeg)
-                    : this._findLeastCollisionAngle(this.descendants, state.allBranches, pivot, allowedPos, allowedNeg);
-                const baselineHits = this._sumCollisionHits(this._collectSubtreeCollisions(this.target.b1, state));
-                const condensePlan = this.target.condenseFor
-                    ? this._planCondenseMove(this.target.b1, state)
-                    : null;
-                const chosenRot = (condensePlan && condensePlan.hits <= baselineHits)
-                    ? {
-                        angle: condensePlan.angle,
-                        dir: condensePlan.dir,
-                        hits: condensePlan.hits,
-                        isCondense: true,
-                        sweepChildId: condensePlan.sweepChildId ?? null
-                    }
-                    : { ...bestRot, isCondense: false, selfResolveOnly, branchHitsChildren };
-
-                // In escalated context, always announce the actual actor before result/fail messages.
-                if (this._isEscalatedActorContext() && !this.target?._announcedTryRotation) {
-                    this.target._announcedTryRotation = true;
-                    this.currentRule = `Rule: ${this._displayActorText(state)} trying rotation for ${this._currentPrimaryText(state)}.`;
-                    this._updateHighlights(state);
-                    return true;
-                }
-
-                let choseSlide = false;
-                if (bestSlide && bestSlide.hits < Infinity) {
-                    if (bestSlide.hits === 0 && bestSlide.targetIdx !== bestSlide.startIdx) {
-                        choseSlide = true;
-                    } else if (bestSlide.hits < chosenRot.hits && bestSlide.targetIdx !== bestSlide.startIdx) {
-                        choseSlide = true;
-                    }
-                }
-
-                if (choseSlide) {
-                    this.slideData = {
-                        targetArr: bestSlide.targetArr,
-                        startIdx: bestSlide.startIdx,
-                        targetIdx: bestSlide.targetIdx,
-                        currentIdx: bestSlide.startIdx,
-                        step: bestSlide.targetIdx < bestSlide.startIdx ? -1 : 1
-                    };
-                    this.state = "SLIDING";
-                    this.currentRule = `Rule: Sliding leaf ${this.target.b1.nodeId} along parent edge to escape overlap.`;
-                } else if (chosenRot.hits === 0 && chosenRot.angle === 0) {
-                    // Seems clear at current angle. But if we escalated here,
-                    // the child might collide with a SIBLING (both in descSet → invisible to _countCollisionsAtAngle).
-                    if (this.target.escalatedFrom) {
-                        const childBranch = state.allBranches.find(b => b.nodeId === this.target.escalatedFrom);
-                        const childScore = childBranch ? this._scoreSelf(childBranch, state.allBranches) : { hits: 0 };
-                        if (childScore.hits > 0) {
-                            // Child still collides (sibling conflict) — escalate further
-                            this.exhaustedNodes.add(this.target.b1.nodeId);
-                            this.target.b1.isHighlightWhite = false;
-                            let currentNodeId = this.target.b1.nodeId;
-                            let ancestor = null;
-                            while (true) {
-                                const pId = this._parentMap.get(currentNodeId);
-                                if (!pId) break;
-                                const pb = state.allBranches.find(b => b.nodeId === pId && b.depth > 0);
-                                if (!pb) break;
-                                if (!this.exhaustedNodes.has(pId)) { ancestor = pb; break; }
-                                currentNodeId = pId;
-                            }
-                            if (ancestor) {
-                                const primaryId = this._currentPrimaryId();
-                                this.currentRule = `Rule: ${this._currentPrimaryText(state)} escalating to ${this._label(ancestor)} ${ancestor.nodeId} because ${this._displayActorText(state)} cannot clear it.`;
-                                const allColls = this._collectSubtreeCollisions(ancestor, state);
-                                let maxScore = 0;
-                                for (const c of allColls) maxScore = Math.max(maxScore, c.hits);
-                                this.target = {
-                                    b1: ancestor,
-                                    targetX: ancestor.path.samples[0].x,
-                                    targetY: ancestor.path.samples[0].y,
-                                    allCollisions: allColls,
-                                    initialTotalHits: allColls.reduce((s, c) => s + c.hits, 0),
-                                    score: maxScore,
-                                    escalatedFrom: this.target.escalatedFrom
-                                };
-                                this._setPrimaryNode(this.target.escalatedFrom);
-                                ancestor.isHighlightWhite = true;
-                                this.state = "FLYING";
-                            } else {
-                                const origBranch = state.allBranches.find(b => b.nodeId === this.target.escalatedFrom);
-                                const rescued = this._tryEscalationFailFallbacks(origBranch, state);
-                                if (!rescued) {
-                                    this.target.b1.isHighlightWhite = false;
-                                    this.state = "SCANNING";
-                                }
-                            }
-                        } else {
-                            // Child is actually clear now — done!
-                            this.exhaustedNodes.add(this.target.b1.nodeId);
-                            this.target.b1.isHighlightWhite = false;
-                            this.state = "SCANNING";
-                            this.currentRule = `Rule: ${this._currentPrimaryText(state)} is now clear after using ${this._displayActorText(state)}.`;
-                        }
-                    } else {
-                        // Non-escalated branch, genuinely clear
-                        this.exhaustedNodes.add(this.target.b1.nodeId);
-                        this.target.b1.isHighlightWhite = false;
-                        this.state = "SCANNING";
-                        this.currentRule = `Rule: ${this._label(this.target.b1)} ${this.target.b1.nodeId} has no collision on its own body. Skipping.`;
-                    }
-                } else if (chosenRot.hits === 0 || chosenRot.isCondense) {
-                    if (chosenRot.isCondense && chosenRot.sweepChildId) {
-                        const sweepChild = state.allBranches.find((b) => b.nodeId === chosenRot.sweepChildId);
-                        const axis = sweepChild ? this._findAxisAlongParentAtChild(this.target.b1, sweepChild) : null;
-                        if (sweepChild && axis) {
-                            const sweepDesc = this._buildDescendants(sweepChild, state);
-                            this._reflectBranchTree(sweepDesc, axis.pivot, axis.nx, axis.ny);
-                            this._refreshOverlap(state);
-                        }
-                    }
-                    // Perfectly clear or condense-directed angle — animate there
-                    this.fixDir = chosenRot.dir;
-                    this.bestEffortAngle = chosenRot.angle;
-                    this._escalationCheckCooldown = 0;
-                    this.state = "FIXING";
-                    if (this._isEscalatedActorContext()) {
-                        this.currentRule = chosenRot.isCondense && chosenRot.sweepChildId
-                            ? `Rule: ${this._displayActorText(state)} sweeping+condensing for ${this._currentPrimaryText(state)}.`
-                            : `Rule: ${this._displayActorText(state)} rotation succeed for ${this._currentPrimaryText(state)}.`;
-                    } else {
-                        this.currentRule = chosenRot.isCondense && chosenRot.sweepChildId
-                            ? `Rule: ${this._currentPrimaryText(state)} sweeping+condensing.`
-                            : `Rule: ${this._currentPrimaryText(state)} rotation succeed.`;
-                    }
-                } else {
-                    if (chosenRot.branchHitsChildren) {
-                        this.exhaustedNodes.add(this.target.b1.nodeId);
-                        this.madeProgress = false;
-                        this.target.b1.isHighlightWhite = false;
-                        this.state = "SCANNING";
-                        this.currentRule = `Rule: ${this._currentPrimaryText(state)} rotation unavailable because it collides with its children.`;
-                        return true;
-                    }
-                    if (this.target.elongatePreferred && this.target.escalatedFrom) {
-                        const orig = state.allBranches.find((b) => b.nodeId === this.target.escalatedFrom);
-                        if (orig && this._startElongatingFallback(orig, state)) {
-                            this.currentRule = `Rule: ${this._displayActorText(state)} rotation not enough for ${this._currentPrimaryText(state)}. going to elongating.`;
-                            return true;
-                        }
-                    }
-                    if (this._isEscalatedActorContext()) {
-                        this.currentRule = `Rule: ${this._displayActorText(state)} rotation failed for ${this._currentPrimaryText(state)}, going to flipping.`;
-                    } else {
-                        this.currentRule = `Rule: ${this._currentPrimaryText(state)} rotation failed, going to flipping.`;
-                    }
-                    // No 0-collision angle. Try TRUE MIRROR FLIP before escalating.
-                    let flipped = false;
-                    let flipAttempted = false;
-                    const flipPivot = pivot;
-                    const pId = this._parentMap.get(this.target.b1.nodeId);
-                    const parentBr = pId ? state.allBranches.find(b => b.nodeId === pId) : null;
-                    if (parentBr && parentBr.path?.samples?.length > 1) {
-                        // Find parent tangent at attachment point
-                        let closestIdx = 0, closestDist = Infinity;
-                        for (let i = 0; i < parentBr.path.samples.length; i++) {
-                            const ps = parentBr.path.samples[i];
-                            if (!ps) continue;
-                            const d = Math.hypot(ps.x - flipPivot.x, ps.y - flipPivot.y);
-                            if (d < closestDist) { closestDist = d; closestIdx = i; }
-                        }
-                        const ps1 = parentBr.path.samples[closestIdx];
-                        const nextIdx = Math.min(closestIdx + 3, parentBr.path.samples.length - 1);
-                        const ps2 = parentBr.path.samples[nextIdx];
-                        if (ps1 && ps2 && (ps1.x !== ps2.x || ps1.y !== ps2.y)) {
-                            const ax = ps2.x - ps1.x, ay = ps2.y - ps1.y;
-                            const alen = Math.hypot(ax, ay);
-                            const nx = ax / alen, ny = ay / alen; // unit axis direction
-                            const axisAngle = Math.atan2(ny, nx);
-                            flipAttempted = true;
-
-                            // Reflection formula: reflect point across line through pivot with direction (nx,ny)
-                            const reflectPt = (p) => {
-                                const dx = p.x - flipPivot.x, dy = p.y - flipPivot.y;
-                                const dot = dx * nx + dy * ny;
-                                p.x = flipPivot.x + 2 * dot * nx - dx;
-                                p.y = flipPivot.y + 2 * dot * ny - dy;
-                            };
-
-                            // Save pre-flip geometry for revert
-                            const preFlip = this.descendants.map(b => ({
-                                left: b.path?.left?.map(p => ({ x: p.x, y: p.y })),
-                                right: b.path?.right?.map(p => ({ x: p.x, y: p.y })),
-                                samples: b.path?.samples?.map(p => p ? { x: p.x, y: p.y } : null),
-                                tipX: b.path?.tipX, tipY: b.path?.tipY,
-                                tipNormX: b.path?.tipNormX, tipNormY: b.path?.tipNormY,
-                                tipTangentAngle: b.path?.tipTangentAngle,
-                                leafData: b.leafData ? { ...b.leafData } : null,
-                            }));
-
-                            // Apply true mirror reflection
-                            for (const bd of this.descendants) {
-                                if (bd.path?.samples) for (const p of bd.path.samples) if (p) reflectPt(p);
-                                if (bd.path?.left) for (const p of bd.path.left) reflectPt(p);
-                                if (bd.path?.right) for (const p of bd.path.right) reflectPt(p);
-                                if (bd.path) {
-                                    const tip = { x: bd.path.tipX, y: bd.path.tipY };
-                                    reflectPt(tip);
-                                    bd.path.tipX = tip.x; bd.path.tipY = tip.y;
-                                    // Reflect tip normal
-                                    const tn = { x: flipPivot.x + bd.path.tipNormX, y: flipPivot.y + bd.path.tipNormY };
-                                    reflectPt(tn);
-                                    bd.path.tipNormX = tn.x - flipPivot.x; bd.path.tipNormY = tn.y - flipPivot.y;
-                                    bd.path.tipTangentAngle = 2 * axisAngle - bd.path.tipTangentAngle;
-                                    // SWAP left/right edges — reflection reverses winding order
-                                    const tmpEdge = bd.path.left;
-                                    bd.path.left = bd.path.right;
-                                    bd.path.right = tmpEdge;
-                                }
-                                if (bd.leafData) {
-                                    const lp = { x: bd.leafData.x, y: bd.leafData.y };
-                                    reflectPt(lp);
-                                    bd.leafData.x = lp.x; bd.leafData.y = lp.y;
-                                    // Reflect angle + PI to keep leaf right-side up
-                                    // (the leaf bezier draws tip at negative-Y, so reflection
-                                    //  reverses the sense — adding PI compensates)
-                                    bd.leafData.angle = 2 * axisAngle - bd.leafData.angle + Math.PI;
-                                }
-                                rebuildPath2d(bd);
-                            }
-
-                            // Check if flip gives 0 collisions for EVERYTHING
-                            // (not just the flipped subtree — flip must not hurt children/neighbours)
-                            const flipRot = this._findLeastCollisionAngle(
-                                this.descendants, state.allBranches, pivot, maxPos, maxNeg
-                            );
-                            // Also verify no NEW collisions appear on any branch in the tree
-                            let flipCausesNewCollisions = false;
-                            if (flipRot.hits === 0) {
-                                for (const b of state.allBranches) {
-                                    if (this.descendants.includes(b)) continue; // already checked
-                                    const sc = this._scoreSelf(b, state.allBranches);
-                                    if (sc.hits > 0) {
-                                        // Check if this collision existed BEFORE the flip
-                                        // by seeing if any of b's partners are in the flipped set
-                                        for (const bd of this.descendants) {
-                                            if (bd === b || !bd.path2d) continue;
-                                            if (this._areAdjacent(b, bd)) continue;
-                                            const s = b.path?.samples;
-                                            if (s) {
-                                                for (let k = this._sampleProbeStart(b); k < s.length; k += 3) {
-                                                    if (s[k] && this._pointHitsBranch(b, bd, s[k], k)) {
-                                                        flipCausesNewCollisions = true;
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            if (flipCausesNewCollisions) break;
-                                        }
-                                    }
-                                    if (flipCausesNewCollisions) break;
-                                }
-                            }
-                            if (flipRot.hits === 0 && !flipCausesNewCollisions) {
-                                flipped = true;
-                                this.fixDir = flipRot.dir;
-                                this.bestEffortAngle = flipRot.angle;
-                                this._escalationCheckCooldown = 0;
-                                this.state = "FIXING";
-                                if (this._isEscalatedActorContext()) {
-                                    this.currentRule = `Rule: ${this._displayActorText(state)} flipping succeed for ${this._currentPrimaryText(state)}.`;
-                                } else {
-                                    this.currentRule = `Rule: ${this._currentPrimaryText(state)} flipping succeed.`;
-                                }
-                            } else {
-                                // Revert mirror
-                                for (let i = 0; i < this.descendants.length; i++) {
-                                    const bd = this.descendants[i];
-                                    const pre = preFlip[i];
-                                    if (bd.path && pre.left && pre.right) {
-                                        bd.path.left = pre.left.map(p => ({ x: p.x, y: p.y }));
-                                        bd.path.right = pre.right.map(p => ({ x: p.x, y: p.y }));
-                                    }
-                                    if (bd.path?.samples && pre.samples) {
-                                        for (let j = 0; j < pre.samples.length; j++) {
-                                            if (pre.samples[j] && bd.path.samples[j]) {
-                                                bd.path.samples[j].x = pre.samples[j].x;
-                                                bd.path.samples[j].y = pre.samples[j].y;
-                                            }
-                                        }
-                                    }
-                                    if (bd.path) {
-                                        bd.path.tipX = pre.tipX; bd.path.tipY = pre.tipY;
-                                        bd.path.tipNormX = pre.tipNormX; bd.path.tipNormY = pre.tipNormY;
-                                        bd.path.tipTangentAngle = pre.tipTangentAngle;
-                                    }
-                                    if (bd.leafData && pre.leafData) Object.assign(bd.leafData, pre.leafData);
-                                    rebuildPath2d(bd);
-                                }
-                            }
-                        }
-                    }
-
-                    if (!flipped) {
-                        // Flip didn't work — check if escalation is useful before escalating.
-                        // If ALL collision partners of the original child are also descendants
-                        // of the proposed ancestor, escalating won't help (they all move together).
-                        this.exhaustedNodes.add(this.target.b1.nodeId);
-                        this.target.b1.isHighlightWhite = false;
-
-                        // Find the child whose collisions we're trying to resolve
-                        const origId = this.target.escalatedFrom || this.target.b1.nodeId;
-                        const origBranch = state.allBranches.find(b => b.nodeId === origId);
-
-                        let currentNodeId = this.target.b1.nodeId;
-                        let ancestor = null;
-                        let escalationPath = [currentNodeId];
-                        let escalationStoppedByChildren = false;
-                        while (true) {
-                            const pId2 = this._parentMap.get(currentNodeId);
-                            if (!pId2) break;
-                            const parentBranch = state.allBranches.find(b => b.nodeId === pId2 && b.depth > 0);
-                            if (!parentBranch) break;
-                            escalationPath.push(pId2);
-                            if (this.exhaustedNodes.has(pId2)) { currentNodeId = pId2; continue; }
-
-                            // Check: would ALL collision partners of the original child
-                            // be descendants of this ancestor? If so, skip it.
-                            const ancDescs = new Set(this._buildDescendants(parentBranch, state).map(b => b.nodeId));
-                            let allPartnersInside = true;
-                            if (origBranch) {
-                                // Check each branch that origBranch collides with — DENSE sampling
-                                for (const b2 of state.allBranches) {
-                                    if (b2 === origBranch || !b2.path2d) continue;
-                                    if (this._areAdjacent(origBranch, b2)) continue;
-                                    // Dense check: does origBranch overlap b2?
-                                    let overlaps = false;
-                                    const s = origBranch.path?.samples;
-                                    if (s) {
-                                        for (let k = this._sampleProbeStart(origBranch); k < s.length; k++) {
-                                            if (s[k] && this._pointHitsBranch(origBranch, b2, s[k], k)) { overlaps = true; break; }
-                                        }
-                                    }
-                                    // Also check reverse: b2's samples inside origBranch
-                                    if (!overlaps && origBranch.path2d) {
-                                        const s2 = b2.path?.samples;
-                                        if (s2) {
-                                            for (let k = this._sampleProbeStart(b2); k < s2.length; k++) {
-                                                if (s2[k] && this._pointHitsBranch(b2, origBranch, s2[k], k)) { overlaps = true; break; }
-                                            }
-                                        }
-                                    }
-                                    if (overlaps && !ancDescs.has(b2.nodeId)) {
-                                        allPartnersInside = false;
-                                        break;
-                                    }
-                                }
-                            }
-                            if (allPartnersInside) {
-                                // All collision partners are siblings within this ancestor's subtree.
-                                // Escalating here won't help — mark exhausted and try next.
-                                this.exhaustedNodes.add(pId2);
-                                escalationStoppedByChildren = true;
-                                currentNodeId = pId2;
-                                continue;
-                            }
-                            ancestor = parentBranch;
-                            break;
-                        }
-
-                        if (ancestor) {
-                            const levelJump = escalationPath.length - 1;
-                            const actorText = this._displayActorText(state);
-                            const primaryText = this._currentPrimaryText(state);
-                            if (this._isEscalatedActorContext()) {
-                                this.currentRule = flipAttempted
-                                    ? `Rule: ${primaryText} escalating to ${this._label(ancestor)} ${ancestor.nodeId} (${levelJump} level(s)) because ${actorText} flipping failed.`
-                                    : `Rule: ${primaryText} escalating to ${this._label(ancestor)} ${ancestor.nodeId} (${levelJump} level(s)) because ${actorText} flipping was unavailable.`;
-                            } else {
-                                this.currentRule = flipAttempted
-                                    ? `Rule: ${primaryText} escalating to ${this._label(ancestor)} ${ancestor.nodeId} (${levelJump} level(s)) because flipping failed.`
-                                    : `Rule: ${primaryText} escalating to ${this._label(ancestor)} ${ancestor.nodeId} (${levelJump} level(s)) because flipping was unavailable.`;
-                            }
-                            const allColls = this._collectSubtreeCollisions(ancestor, state);
-                            let maxScore = 0;
-                            for (const c of allColls) maxScore = Math.max(maxScore, c.hits);
-                            this.target = {
-                                b1: ancestor,
-                                targetX: ancestor.path.samples[0].x,
-                                targetY: ancestor.path.samples[0].y,
-                                allCollisions: allColls,
-                                initialTotalHits: allColls.reduce((s, c) => s + c.hits, 0),
-                                score: maxScore,
-                                escalatedFrom: this.target.escalatedFrom || this.target.b1.nodeId
-                            };
-                            this._setPrimaryNode(origId);
-                            ancestor.isHighlightWhite = true;
-                            this.state = "FLYING";
-                        } else {
-                            if (this._isEscalatedActorContext()) {
-                                this.currentRule = flipAttempted
-                                    ? `Rule: ${this._displayActorText(state)} flipping failed for ${this._currentPrimaryText(state)}.`
-                                    : `Rule: ${this._displayActorText(state)} flipping was unavailable for ${this._currentPrimaryText(state)}.`;
-                            } else {
-                                this.currentRule = flipAttempted
-                                    ? `Rule: ${this._currentPrimaryText(state)} flipping failed.`
-                                    : `Rule: ${this._currentPrimaryText(state)} flipping was unavailable.`;
-                            }
-                            if (escalationStoppedByChildren) {
-                                this.currentRule = `Rule: ${this._currentPrimaryText(state)} escalating stopped because all collision partners are children of explored ancestors.`;
-                            } else {
-                                this.currentRule = `Rule: ${this._currentPrimaryText(state)} escalating failed.`;
-                            }
-                            const rescued = this._tryEscalationFailFallbacks(origBranch, state);
-                            if (!rescued) {
-                                this.target.b1.isHighlightWhite = false;
-                                this.state = "SCANNING";
-                            }
-                        }
-                    }
-                }
+                this.thinker = this._solveCollisionWorker(this.target.b1, state);
+                this.thinkerDelay = 10;
+                this.fixPlan = null;
+                this.state = "THINKING";
             } else {
                 const speed = Math.min(dist * 0.06, 4);
                 this.x += (dx / dist) * speed;
                 this.y += (dy / dist) * speed;
             }
 
-            // ── FIXING: animate 0.25°/frame toward the pre-computed best angle ───
-            // Single-pass, no safety guard (the best angle was chosen globally to
-            // minimise total hits, which naturally accounts for any new contacts).
+        } else if (this.state === "THINKING") {
+            if (this.thinkerDelay > 0) {
+                this.thinkerDelay--;
+                return true;
+            }
+
+            let res;
+            try {
+                res = this.thinker.next();
+            } catch (e) {
+                this.currentRule = "Rule: ERROR: " + e.message;
+                this.target = null;
+                this.state = "SCANNING";
+                console.error("Thinker error:", e);
+                return true;
+            }
+            if (!res.done) {
+                this.currentRule = "Rule: " + res.value;
+                if (res.value) {
+                    const textStr = String(res.value).toLowerCase();
+                    for (let b of state.allBranches) { b.isHighlightWhite = false; b.isHighlightGreen = false; }
+
+                    let numbers = res.value.match(/n?\d+/g);
+                    if (textStr.includes("escalated to")) {
+                        let p1 = res.value.split("escalated to");
+                        let pIdStr = p1[0].match(/\d+/)?.[0];
+                        let aIdStr = p1[1].match(/\d+/)?.[0];
+                        let brP = state.allBranches.find(b => b.nodeId == Number(pIdStr));
+                        let brA = state.allBranches.find(b => b.nodeId == Number(aIdStr));
+                        if (brP) brP.isHighlightWhite = true;
+                        if (brA) brA.isHighlightGreen = true;
+                    } else if (numbers && numbers.length > 0) {
+                        let primaryId = numbers[0].replace('n', '');
+                        let brP = state.allBranches.find(b => b.nodeId == Number(primaryId));
+                        if (brP) brP.isHighlightWhite = true;
+
+                        if (this.testedActorId) {
+                            let brA = state.allBranches.find(b => b.nodeId == this.testedActorId);
+                            if (brA) brA.isHighlightGreen = true;
+                        }
+                    }
+                }
+                this.thinkerDelay = 40; // UI pause
+            } else {
+                if (this.fixPlan) {
+                    this.state = "APPLYING_SOLUTION";
+                    this.animActorProgress = 0;
+                    this.animPrimaryProgress = 0;
+
+                    if (this.fixPlan.actor && this.fixPlan.actorSol.actorFlip && this.fixPlan.actorSol.actorFlipAxis) {
+                        const actorDesc = this._buildDescendants(this.fixPlan.actor, state);
+                        const pivot = this.fixPlan.actor.path.samples[0];
+                        const axis = this.fixPlan.actorSol.actorFlipAxis;
+                        this._flipTree(actorDesc, pivot, axis.nx, axis.ny, axis.axisAngle);
+                    }
+                    if (this.fixPlan.primarySol.flip && this.fixPlan.primarySol.flipAxis) {
+                        const primaryDesc = this._buildDescendants(this.fixPlan.primary, state);
+                        const pivot = this.fixPlan.primary.path.samples[0];
+                        const axis = this.fixPlan.primarySol.flipAxis;
+                        this._flipTree(primaryDesc, pivot, axis.nx, axis.ny, axis.axisAngle);
+                    }
+                    this._refreshOverlap(state); // Ensure geometry update
+                } else {
+                    if (this.target && this.target.b1) this.target.b1.isHighlightWhite = false;
+                    this.target = null;
+                    this.state = "SCANNING";
+                }
+            }
+
+        } else if (this.state === "APPLYING_SOLUTION") {
+            const stepRad = deg2rad(1); // Rotation speed per frame
+
+            let actorDone = true;
+            if (this.fixPlan.actor && this.fixPlan.actorSol) {
+                const targetA = this.fixPlan.actorSol.actorAngle;
+                const diffA = targetA - this.animActorProgress;
+                if (Math.abs(diffA) > 0.005) {
+                    actorDone = false;
+                    const step = Math.sign(diffA) * Math.min(stepRad, Math.abs(diffA));
+                    this.animActorProgress += step;
+                    const pivot = this.fixPlan.actor.path.samples[0];
+                    const desc = this._buildDescendants(this.fixPlan.actor, state);
+                    this._rotateBranchTree(desc, step, pivot);
+                }
+            }
+
+            let primaryDone = true;
+            if (this.fixPlan.primarySol) {
+                if (actorDone) {
+                    const targetP = this.fixPlan.primarySol.angle;
+                    const diffP = targetP - this.animPrimaryProgress;
+                    if (Math.abs(diffP) > 0.005) {
+                        primaryDone = false;
+                        const step = Math.sign(diffP) * Math.min(stepRad, Math.abs(diffP));
+                        this.animPrimaryProgress += step;
+                        const pivot = this.fixPlan.primary.path.samples[0];
+                        const desc = this._buildDescendants(this.fixPlan.primary, state);
+                        this._rotateBranchTree(desc, step, pivot);
+                    }
+                } else {
+                    primaryDone = false;
+                }
+            }
+
+            this._refreshOverlap(state); // make sure canvas sees the rotation in progress
+
+            if (actorDone && primaryDone) {
+                this.madeProgress = true;
+                // Action done, clear exhausted list!
+                this.exhaustedNodes.clear();
+
+                if (this.target && this.target.b1) this.target.b1.isHighlightWhite = false;
+                this.target = null;
+                this.state = "SCANNING";
+                this.testedActorId = null;
+            }
         } else if (this.state === "ELONGATING") {
             this._tickElongating(state);
         } else if (this.state === "REBUILDING") {
             this._tickRebuildJob(state);
-        } else if (this.state === "FIXING") {
-            const b = this.target.b1;
-            const pivot = b.path.samples[0];
-            const step = deg2rad(0.25);
-
-            this._rotateBranchTree(this.descendants, step * this.fixDir, pivot);
-            this.currentFixAngle += step;
-            this._refreshOverlap(state);
-            const selfHits = this._currentSelfHits(state);
-
-            if (this.target.escalatedFrom) {
-                if (this._escalationCheckCooldown <= 0) {
-                    this._escalationCheckCooldown = 6;
-                    const child = state.allBranches.find(b => b.nodeId === this.target.escalatedFrom);
-                    if (child && this._branchCanSelfResolve(child, state)) {
-                        this.madeProgress = true;
-                        if (!this._handoffToEscalatedChild(state)) {
-                            this.target.b1.isHighlightWhite = false;
-                            this.state = "SCANNING";
-                            this.currentRule = `Rule: Escalated ${this._label(this.target.b1)} ${this.target.b1.nodeId} rotated enough. ${this._label(child)} ${child.nodeId} can now resolve itself.`;
-                        }
-                        return true;
-                    }
-                } else {
-                    this._escalationCheckCooldown--;
-                }
-            }
-            if (this.target.opensFor && this._handoffToOpenedOriginal(state)) {
-                return true;
-            }
-
-            // STOP EARLY if the branch hit 0 collisions globally, OR if we reached the max best angle
-            const resolvedForActiveRule = this.target.selfResolveOnly ? selfHits === 0 : this.target.allCollisions.length === 0;
-            if (resolvedForActiveRule || this.currentFixAngle >= this.bestEffortAngle - step / 2) {
-                this.madeProgress = true; // We successfully committed a rotation
-                // ── Arrived at best angle (or cleared early) ───
-                const fresh = this.target.allCollisions;
-                if (this.target.opensFor && this._handoffToOpenedOriginal(state)) {
-                    return true;
-                }
-                if (this.target.escalatedFrom && this._handoffToEscalatedChild(state)) {
-                    return true;
-                }
-
-                if (this.target.selfResolveOnly ? selfHits === 0 : fresh.length === 0) {
-                    // Truly clear
-                    this.target.b1.isHighlightWhite = false;
-                    this.state = "SCANNING";
-                } else {
-                    // Still colliding at the best achievable angle
-                    // Best we can do with rotation — move on
-                    this.exhaustedNodes.add(b.nodeId);
-                    this.state = "SCANNING";
-                }
-            }
-
-            // ── SLIDING: Move the leaf along the branch edge ────────────────────
-        } else if (this.state === "SLIDING") {
-            const arr = this.slideData.targetArr;
-            const maxIdx = arr.length - 1;
-
-            // Previous position on the edge
-            const prevIdx = Math.max(0, Math.min(maxIdx, Math.floor(this.slideData.currentIdx)));
-            const prevPt = arr[prevIdx];
-
-            // Advance along the edge curve
-            this.slideData.currentIdx += this.slideData.step * 0.5;
-            this.slideData.currentIdx = Math.max(0, Math.min(maxIdx, this.slideData.currentIdx));
-
-            // Reached target?
-            let reached = false;
-            if (this.slideData.step < 0 && this.slideData.currentIdx <= this.slideData.targetIdx) reached = true;
-            if (this.slideData.step > 0 && this.slideData.currentIdx >= this.slideData.targetIdx) reached = true;
-
-            const nextIdx = Math.max(0, Math.min(maxIdx, Math.floor(this.slideData.currentIdx)));
-            const currPt = arr[nextIdx];
-            const dx = currPt.x - prevPt.x;
-            const dy = currPt.y - prevPt.y;
-
-            if (dx !== 0 || dy !== 0) {
-                this._translateBranchTree(this.descendants, dx, dy);
-            }
-            this._refreshOverlap(state);
-
-            if (this.target.allCollisions.length === 0 || reached) {
-                this.madeProgress = true;
-                if (this.target.opensFor && this._handoffToOpenedOriginal(state)) {
-                    return true;
-                }
-                if (this.target.allCollisions.length === 0) {
-                    this.target.b1.isHighlightWhite = false;
-                    this.state = "SCANNING";
-                } else {
-                    this.exhaustedNodes.add(this.target.b1.nodeId);
-                    this.state = "SCANNING";
-                }
-            }
         }
 
         this._updateHighlights(state);
@@ -2628,6 +2667,11 @@ export class Agent {
             } else if (primaryId) {
                 const p = state.allBranches.find(b => b.nodeId === primaryId);
                 if (p) p.isHighlightWhite = true;
+            }
+
+            if (this.testedActorId && !this.fixPlan) {
+                const s = state.allBranches.find(b => b.nodeId === this.testedActorId);
+                if (s) s.isHighlightGreen = true;
             }
         }
     }
