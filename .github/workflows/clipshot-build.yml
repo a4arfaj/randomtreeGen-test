@@ -7,6 +7,9 @@ on:
     paths:
       - 'clipshot-src.b64'
       - '.github/workflows/clipshot-build.yml'
+  pull_request:
+    branches:
+      - main
 
 jobs:
   build:
