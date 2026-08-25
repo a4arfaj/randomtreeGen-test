@@ -1,0 +1,36 @@
+name: Build ClipShot APK
+
+on:
+  push:
+    branches:
+      - clipshot-build-temp
+    paths:
+      - 'clipshot-src.b64'
+      - '.github/workflows/clipshot-build.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Restore ClipShot project
+        run: |
+          mkdir -p clipshot-build
+          base64 -d clipshot-src.b64 > clipshot.tgz
+          tar -xzf clipshot.tgz -C clipshot-build
+      - name: Build debug APK
+        working-directory: clipshot-build
+        run: gradle --no-daemon assembleDebug
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipShot-APK
+          path: clipshot-build/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
